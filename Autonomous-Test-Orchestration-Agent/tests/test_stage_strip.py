@@ -71,6 +71,61 @@ class TestStageStripStates:
         assert "failed" in runner_block.group(0)
         assert "<span class='stage-status-badge'>FAILED</span>" in runner_block.group(0)
 
+    def test_failed_planner_marks_subsequent_stages_skipped_not_succeeded(self):
+        decision_log = [
+            {"stage": "orchestrator", "event": "start", "summary": "Run started"},
+            {"stage": "planner", "event": "start", "summary": "planner started"},
+            {"stage": "planner", "event": "error", "summary": "planner failed: rate limit 429"},
+            {"stage": "report", "event": "start", "summary": "report started"},
+            {"stage": "report", "event": "complete", "summary": "report complete"},
+        ]
+        html = self._capture_markdown("report", "failed", decision_log=decision_log)
+
+        # Planner must be marked FAILED
+        planner_block = re.search(r"stage-node ([^>]*failed[^>]*>.*?planner.*?</div>\s*</a>)", html, re.DOTALL | re.IGNORECASE)
+        assert planner_block is not None
+        assert "FAILED" in planner_block.group(0)
+
+        # Downstream unexecuted stages must NOT be marked SUCCEEDED; they must be SKIPPED
+        assert html.count("<span class='stage-status-badge'>SUCCEEDED</span>") == 1  # only report completed
+        for stage in ["coverage_gate", "risk_ranking", "generator", "runner", "healer", "visual_diff", "bug_packager"]:
+            block = re.search(rf"stage-node ([^>]*pending[^>]*>.*?{stage.replace('_', ' ')}.*?</div>\s*</a>)", html, re.DOTALL | re.IGNORECASE)
+            assert block is not None, f"Stage {stage} should be pending/skipped"
+            assert "SKIPPED" in block.group(0), f"Stage {stage} should have SKIPPED badge"
+            assert "SUCCEEDED" not in block.group(0), f"Stage {stage} must NOT be SUCCEEDED"
+
+        # Report completed synthesizing the failure report so it is SUCCEEDED
+        report_block = re.search(r"stage-node ([^>]*done[^>]*>.*?report.*?</div>\s*</a>)", html, re.DOTALL | re.IGNORECASE)
+        assert report_block is not None
+        assert "SUCCEEDED" in report_block.group(0)
+
+    def test_failed_runner_marks_earlier_succeeded_and_later_skipped(self):
+        decision_log = [
+            {"stage": "planner", "event": "complete", "summary": "planner complete"},
+            {"stage": "coverage_gate", "event": "complete", "summary": "gate complete"},
+            {"stage": "risk_ranking", "event": "complete", "summary": "ranking complete"},
+            {"stage": "generator", "event": "complete", "summary": "generator complete"},
+            {"stage": "runner", "event": "error", "summary": "runner failed: tests failed"},
+            {"stage": "report", "event": "complete", "summary": "report complete"},
+        ]
+        html = self._capture_markdown("report", "failed", decision_log=decision_log)
+        # planner, coverage_gate, risk_ranking, generator, report -> 5 SUCCEEDED
+        assert html.count("<span class='stage-status-badge'>SUCCEEDED</span>") == 5
+        # runner -> 1 FAILED
+        assert html.count("<span class='stage-status-badge'>FAILED</span>") == 1
+        # healer, visual_diff, bug_packager -> 3 SKIPPED
+        assert html.count("<span class='stage-status-badge'>SKIPPED</span>") == 3
+
+    def test_cancelled_run_marks_unexecuted_stages_skipped(self):
+        decision_log = [
+            {"stage": "planner", "event": "complete", "summary": "planner complete"},
+            {"stage": "coverage_gate", "event": "complete", "summary": "gate complete"},
+        ]
+        html = self._capture_markdown("risk_ranking", "cancelled", decision_log=decision_log)
+        assert "<span class='stage-status-badge'>CANCELLED</span>" in html
+        assert "<span class='stage-status-badge'>SKIPPED</span>" in html
+
+
     def test_all_stages_have_native_tooltips(self):
         html = self._capture_markdown("planner", "running")
         for stage in STAGES:

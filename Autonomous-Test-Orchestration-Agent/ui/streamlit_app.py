@@ -696,15 +696,15 @@ def inject_styles(theme: str = "dark") -> None:
         .stage-node.done .stage-dot {{ background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }}
         .stage-node.done .stage-status-badge {{ background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.25); color: #4ade80; }}
 
-        /* PENDING State: theme aware */
-        .stage-node.pending {{
+        /* PENDING & SKIPPED State: theme aware */
+        .stage-node.pending, .stage-node.skipped {{
           background: {stage_pending_bg};
           border: 1px solid {stage_pending_border};
           opacity: 0.7;
         }}
-        .stage-node.pending .stage-name {{ color: {stage_pending_name} !important; }}
-        .stage-node.pending .stage-dot {{ background: {stage_pending_border}; border: 1px solid var(--line); box-shadow: none; }}
-        .stage-node.pending .stage-status-badge {{ background: transparent; border: 1px solid var(--line); color: {stage_pending_text}; }}
+        .stage-node.pending .stage-name, .stage-node.skipped .stage-name {{ color: {stage_pending_name} !important; }}
+        .stage-node.pending .stage-dot, .stage-node.skipped .stage-dot {{ background: {stage_pending_border}; border: 1px solid var(--line); box-shadow: none; }}
+        .stage-node.pending .stage-status-badge, .stage-node.skipped .stage-status-badge {{ background: transparent; border: 1px solid var(--line); color: {stage_pending_text}; }}
 
         /* FAILED State: RED */
         .stage-node.failed {{
@@ -1222,6 +1222,20 @@ def render_stage_strip(
                 elif ev == "error":
                     failed_stages.add(stg)
 
+    # Stages that suffered an unrecovered error (did not subsequently complete)
+    unrecovered_failed = {s for s in failed_stages if s not in completed_stages}
+
+    # Find the earliest failed pipeline stage
+    pipeline_failed_stages = [s for s in STAGES if s in unrecovered_failed]
+    if pipeline_failed_stages:
+        first_failed_idx = STAGES.index(pipeline_failed_stages[0])
+    elif "orchestrator" in unrecovered_failed and not (completed_stages - {"report"}):
+        first_failed_idx = 0
+    elif status in ("failed", "cancelled") and index >= 0 and STAGES[index] not in completed_stages:
+        first_failed_idx = index
+    else:
+        first_failed_idx = -1
+
     states: list[str] = []
     badges: list[str] = []
     for position, stage in enumerate(STAGES):
@@ -1229,15 +1243,18 @@ def render_stage_strip(
             state = "done"
             badge = "SUCCEEDED"
         elif status in ("failed", "cancelled"):
-            if stage in failed_stages or (position == index and status == "failed"):
+            if stage in unrecovered_failed or (position == first_failed_idx and stage not in completed_stages):
                 state = "failed"
-                badge = "FAILED"
-            elif position < index or stage in completed_stages:
+                badge = "FAILED" if status == "failed" else "CANCELLED"
+            elif stage in completed_stages:
+                state = "done"
+                badge = "SUCCEEDED"
+            elif not decision_log and first_failed_idx >= 0 and position < first_failed_idx:
                 state = "done"
                 badge = "SUCCEEDED"
             else:
                 state = "pending"
-                badge = "PENDING"
+                badge = "SKIPPED"
         else:  # running or queued
             if position == index or (current == stage and status == "running"):
                 state = "running"
