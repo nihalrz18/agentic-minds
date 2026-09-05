@@ -23,17 +23,36 @@ Credentials never appear in a generated test. Tests that need them call
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from browser.sandbox import build_namespace, validate_test_source
-from browser.screenshots import capture, capture_dom_snippet
-from browser.session import BrowserSession, attach_console_capture
+from browser.screenshots import (
+    capture,
+    capture_dom_snippet,
+    dynamic_locators,
+    freeze_dynamic_rendering,
+)
+from browser.session import (
+    BrowserSession,
+    attach_console_capture,
+    install_navigation_guard,
+    install_third_party_blocker,
+)
 from config import Settings, get_settings
-from graph.state import GeneratedTest, TestFlow, TestResult, TestStatus, utcnow_iso
+from graph.state import (
+    GeneratedTest,
+    RiskLevel,
+    TestFlow,
+    TestResult,
+    TestStatus,
+    utcnow_iso,
+)
 from logging_setup import get_logger
+from ops import RateLimiter, effective_parallelism, host_of
 from security import SECRET_BOX, redact_text, sanitize_url
 
 log = get_logger("aivor.runner")
@@ -103,6 +122,15 @@ async def execute_test(
 
     try:
         context = await session.new_context()
+        # Analytics, ads and chat widgets are blocked before the page loads.
+        # They are the dominant source of false-positive visual diffs (a
+        # rotating ad creative changes every capture) and they are not part of
+        # the application under test.
+        if cfg.visual_block_third_party:
+            await install_third_party_blocker(context)
+        # The navigation guard applies here too: a generated test navigates,
+        # and the pages it reaches can redirect anywhere.
+        await install_navigation_guard(context, settings=cfg, context_label="execution")
         page = await context.new_page()
         attach_console_capture(page, console_errors)
 
@@ -158,10 +186,17 @@ async def execute_test(
             except Exception:
                 result.final_url = None
             # The viewport frame is the visual-diff subject and is always taken.
+            # Time and randomness are seeded, and dynamic regions are masked,
+            # so that two captures of an unchanged page compare equal rather
+            # than differing by a clock tick or a rotating avatar.
+            if cfg.visual_freeze_time:
+                await freeze_dynamic_rendering(page)
+            dynamic_masks = await dynamic_locators(page, cfg.visual_mask_selectors)
             result.screenshot_path = await capture(
                 page,
                 screenshot_dir / f"{flow.id}__viewport.png",
                 full_page=False,
+                extra_mask=dynamic_masks,
             )
             if result.status is not TestStatus.PASSED:
                 failure_shot = await capture(
@@ -235,18 +270,21 @@ async def run_suite(
         )
         return result
 
-    if cfg.enable_parallel_execution and len(pairs) > 1:
-        semaphore = asyncio.Semaphore(max(1, cfg.max_parallel_flows))
+    # Parallelism is decided by policy, not by the flag alone: concurrent flows
+    # against a target with no host-level throttle is a load test somebody else
+    # did not agree to. See ops.effective_parallelism.
+    parallel_limit, parallel_reason = effective_parallelism(cfg)
+    if parallel_limit > 1 and len(pairs) > 1:
+        semaphore = asyncio.Semaphore(parallel_limit)
+        limiter = RateLimiter(cfg.target_rate_limit_per_s)
+        target_host = host_of(pairs[0][0].url)
 
         async def _guarded(flow: TestFlow, test: GeneratedTest) -> TestResult:
             async with semaphore:
+                await limiter.acquire(target_host)
                 return await _one(flow, test)
 
-        log.info(
-            "executing %d tests in parallel (max %d concurrent)",
-            len(pairs),
-            cfg.max_parallel_flows,
-        )
+        log.info("executing %d tests in parallel - %s", len(pairs), parallel_reason)
         gathered = await asyncio.gather(
             *[_guarded(flow, test) for flow, test in pairs], return_exceptions=True
         )
@@ -266,10 +304,117 @@ async def run_suite(
                 results.append(outcome)
         return results
 
+    if cfg.enable_parallel_execution:
+        # The operator asked for parallelism and did not get it. Saying so is
+        # the difference between a deliberate safety decision and a silent
+        # config bug that makes every run mysteriously slow.
+        log.warning("parallel execution requested but not used - %s", parallel_reason)
+
     results = []
     for flow, test in pairs:
         results.append(await _one(flow, test))
     return results
+
+
+def should_rerun_for_flake(result: TestResult, risk: RiskLevel, cfg: Settings) -> tuple[bool, str]:
+    """Whether a failure justifies one confirmation re-run.
+
+    A re-run is only worth its wall-clock when the failure is of a kind that
+    genuinely differs between attempts *and* the flow matters enough to pay for
+    the certainty. A clean assertion failure is reproducible by construction and
+    is re-run for nothing; a timeout, a navigation error or a detached element
+    is exactly the ambiguity a second attempt resolves.
+
+    Re-running everything would double the runtime of every red build and teach
+    people to distrust the "flaky" label. Re-running nothing leaves a real
+    defect and a slow network indistinguishable.
+    """
+    if not cfg.rerun_failed_flows:
+        return False, "reruns disabled by configuration"
+    if result.status not in (TestStatus.FAILED, TestStatus.ERROR):
+        return False, "the test did not fail"
+    if result.attempts and result.attempts > 1:
+        return False, "already re-run once; the cap is one re-run per flow"
+
+    blob = f"{result.error_type} {result.error_message}".lower()
+    transient = (
+        "timeout",
+        "timeouterror",
+        "navigation",
+        "net::",
+        "econnreset",
+        "element is not attached",
+        "detached from",
+        "target closed",
+        "context was destroyed",
+        "waiting for",
+    )
+    if any(token in blob for token in transient):
+        return True, f"failure looks timing-dependent ({result.error_type or 'unknown'})"
+    if risk is RiskLevel.HIGH:
+        return True, "high-risk flow: confirm the failure before filing it as a defect"
+    return False, "deterministic failure on a non-critical flow; one attempt is conclusive"
+
+
+async def rerun_for_flake(
+    session: BrowserSession,
+    *,
+    run_id: str,
+    flow: TestFlow,
+    test: GeneratedTest,
+    screenshot_dir: Path,
+    settings: Settings | None = None,
+    progress: ProgressFn | None = None,
+) -> TestResult:
+    """Re-execute one failed test once, after a jittered pause.
+
+    The pause is randomised rather than fixed so that a failure caused by the
+    agent landing on the same point of a target's own rate-limit or animation
+    cycle does not reproduce for the same reason twice. The result carries
+    ``attempt=2``, which stops any further re-run through
+    :func:`should_rerun_for_flake`.
+    """
+    cfg = settings or get_settings()
+    emit = progress or (lambda flow_id, summary, detail="": None)
+    delay_s = random.uniform(cfg.rerun_jitter_ms / 2000.0, cfg.rerun_jitter_ms / 1000.0)
+    emit(
+        flow.id,
+        f"{flow.id}: re-running once after {delay_s:.2f}s to confirm the failure",
+        "a second attempt separates a genuine defect from a timing flake",
+    )
+    await asyncio.sleep(delay_s)
+    result = await execute_test(
+        session,
+        run_id=run_id,
+        flow=flow,
+        test=test,
+        screenshot_dir=screenshot_dir,
+        settings=cfg,
+        attempt=2,
+    )
+    result.rerun_of_failure = True
+    return result
+
+
+def classify_rerun(first: TestResult, second: TestResult) -> tuple[TestResult, str]:
+    """Combine a failure and its confirmation attempt into one verdict.
+
+    A flow that fails then passes is *flaky*, which is a finding in its own
+    right and not a pass: reporting it as green would hide instability that a
+    user will meet in production. The second result is returned so the evidence
+    reflects the most recent attempt, with the disagreement recorded.
+    """
+    if second.status is TestStatus.PASSED and first.status is not TestStatus.PASSED:
+        second.flaky = True
+        second.notes.append(
+            f"attempt 1 failed with {first.error_type or 'an error'} and attempt 2 passed; "
+            "this flow is unstable and is reported as flaky rather than as passing"
+        )
+        return second, "flaky: passed only on the second attempt"
+    if second.status in (TestStatus.FAILED, TestStatus.ERROR):
+        second.notes.append("failure reproduced on a second attempt; treated as a real defect")
+        return second, "confirmed: the failure reproduced"
+    return second, "re-run produced a non-failing status"
 
 
 async def rerun_single(

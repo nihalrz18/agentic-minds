@@ -1009,6 +1009,9 @@ def assemble_report(
         feature_flags={str(k): bool(v) for k, v in feature_flags.items()},
         limitations=limitations,
         errors=deduped_errors,
+        llm_cost=dict(state.get("llm_cost") or {}),
+        timings=dict(state.get("timings") or {}),
+        safety=dict(state.get("safety") or {}),
     )
 
 

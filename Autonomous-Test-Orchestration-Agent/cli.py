@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from config import Settings, ensure_dirs, get_settings, set_settings
+from target_policy import TargetPolicy, evaluate_target, log_decision
 from graph.state import new_run_id
 from logging_setup import configure_logging, get_logger
 from security import SECRET_BOX, Credentials, insecure_for_credentials
@@ -61,6 +62,40 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--parallel", action="store_true", help="enable parallel flow execution")
     run.add_argument("--offline", action="store_true", help="LLM_OFFLINE_MODE: stub, no model")
     run.add_argument("--log-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
+    safety = parser.add_argument_group("target and safety policy")
+    safety.add_argument(
+        "--allow-private",
+        action="store_true",
+        help=(
+            "permit a loopback/private/link-local target such as "
+            "http://localhost:3000. Cloud metadata endpoints stay blocked."
+        ),
+    )
+    safety.add_argument(
+        "--allow-insecure-tls",
+        action="store_true",
+        help="ignore TLS certificate errors (self-signed staging certificates only)",
+    )
+    safety.add_argument(
+        "--allowlist",
+        default=None,
+        help="comma-separated hosts this run may test, e.g. '*.staging.example.com'",
+    )
+    safety.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="DISABLE safe mode: permits payment, checkout, delete and other irreversible actions",
+    )
+    safety.add_argument(
+        "--authorize",
+        default=None,
+        help=(
+            "comma-separated destructive categories to authorise while keeping safe "
+            "mode on: payment, checkout, delete, account_cancellation, "
+            "password_reset, email_send, irreversible_submit"
+        ),
+    )
     return parser
 
 
@@ -94,6 +129,20 @@ def apply_overrides(args: argparse.Namespace) -> Settings:
         overrides["llm_offline_mode"] = True
     if args.log_level:
         overrides["log_level"] = args.log_level
+    if args.allow_private:
+        overrides["allow_private_targets"] = True
+    if args.allow_insecure_tls:
+        overrides["allow_insecure_tls"] = True
+    if args.allowlist:
+        overrides["target_allowlist"] = tuple(
+            chunk.strip() for chunk in args.allowlist.replace(";", ",").split(",") if chunk.strip()
+        )
+    if args.unsafe:
+        overrides["safe_mode"] = False
+    if args.authorize:
+        overrides["authorized_destructive_actions"] = tuple(
+            chunk.strip() for chunk in args.authorize.replace(";", ",").split(",") if chunk.strip()
+        )
     settings = get_settings().with_overrides(**overrides) if overrides else get_settings()
     set_settings(settings)
     return settings
@@ -110,6 +159,27 @@ async def run(args: argparse.Namespace) -> int:
     if not target.startswith(("http://", "https://")):
         print(f"error: target must be an http(s) URL, got {target!r}", file=sys.stderr)
         return 2
+
+    # Pre-flight target admission. The navigation guard would catch a blocked
+    # target anyway, but doing it here turns "the crawl mysteriously found no
+    # pages" into one clear sentence naming the rule and how to override it.
+    decision = evaluate_target(target, TargetPolicy.from_settings(settings))
+    log_decision(decision, context="cli")
+    if not decision.allowed:
+        print(f"error: {decision.detail}", file=sys.stderr)
+        return 4
+    if decision.overridden:
+        print(
+            f"warning: testing a {decision.category} target because --allow-private "
+            "was given; cloud metadata endpoints remain blocked.",
+            file=sys.stderr,
+        )
+    if not settings.safe_mode:
+        print(
+            "warning: SAFE MODE IS OFF. Payments, orders, deletions and account "
+            "closures on the target may be performed for real.",
+            file=sys.stderr,
+        )
 
     if not settings.llm_available:
         print(

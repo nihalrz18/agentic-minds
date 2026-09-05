@@ -1,6 +1,24 @@
-version: "3.9"
-
 services:
+  # Local development database. In production this is replaced by Neon.tech
+  # (set DATABASE_URL in backend/.env to the Neon connection string).
+  postgres:
+    image: postgres:15
+    container_name: swarmaudit-postgres
+    environment:
+      POSTGRES_USER: swarmaudit
+      POSTGRES_PASSWORD: swarmaudit
+      POSTGRES_DB: swarmaudit
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarmaudit -d swarmaudit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -12,15 +30,18 @@ services:
       - ./backend/.env
     environment:
       - ENVIRONMENT=development
-      - VALIDATION_ENABLED=true
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - /tmp/reports:/tmp/reports
       - /tmp/swarmaudit_repos:/tmp/swarmaudit_repos
-      # Mount Docker socket so sandbox validation can spawn sibling containers.
-      # SECURITY NOTE: this grants the container access to the host Docker daemon.
-      # Do NOT use in untrusted or shared environments. Remove this line to disable
-      # sandbox validation locally (set VALIDATION_ENABLED=false in .env instead).
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Sandbox validation needs the Docker socket to spawn sibling containers.
+      # Left disabled for local dev (VALIDATION_ENABLED=false in backend/.env),
+      # because mounting it grants the container full access to the host Docker
+      # daemon. To enable: uncomment below AND set VALIDATION_ENABLED=true.
+      # SECURITY NOTE: never do this in untrusted or shared environments.
+      # - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -40,6 +61,9 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:
 
 # Frontend runs separately: cd frontend && npm run dev
 # It connects to http://localhost:8000 (backend) or http://localhost:80 (nginx)

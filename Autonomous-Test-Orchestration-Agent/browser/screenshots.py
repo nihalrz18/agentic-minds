@@ -40,6 +40,107 @@ SENSITIVE_FIELD_SELECTORS: tuple[str, ...] = (
 
 MASK_COLOR = "#111827"
 
+# Content that legitimately changes between two captures of a working page.
+# Masking it is what separates "the checkout button moved" from "the clock
+# ticked", and it is the difference between a visual suite people act on and
+# one they mute. Kept deliberately conservative: over-masking hides real
+# regressions, so these target elements that *advertise* themselves as dynamic
+# via a semantic tag, role or a conventional class/testid name.
+DYNAMIC_CONTENT_SELECTORS: tuple[str, ...] = (
+    "time",
+    "[datetime]",
+    "[data-testid*='timestamp' i]",
+    "[data-testid*='date' i]",
+    "[class*='timestamp' i]",
+    "[class*='relative-time' i]",
+    "[class*='last-updated' i]",
+    "[class*='avatar' i]",
+    "[class*='gravatar' i]",
+    "img[alt*='avatar' i]",
+    "[class*='carousel' i]",
+    "[class*='slider' i]",
+    "[aria-live='polite']",
+    "[aria-live='assertive']",
+    "[role='status']",
+    "[class*='cookie' i][class*='banner' i]",
+    "[id*='cookie' i][id*='banner' i]",
+    "[class*='toast' i]",
+    "[class*='notification' i]",
+    "[class*='ad-' i]",
+    "[class*='advert' i]",
+    "iframe[src*='ads' i]",
+    "[class*='price' i]",
+    "[data-testid*='price' i]",
+)
+
+# Injected before capture to stop time- and randomness-driven rendering from
+# differing between two otherwise identical captures.
+FREEZE_SCRIPT: str = """
+() => {
+  const FIXED = new Date('2020-01-01T00:00:00Z').getTime();
+  try {
+    const RealDate = Date;
+    // eslint-disable-next-line no-global-assign
+    Date = class extends RealDate {
+      constructor(...args) { super(...(args.length ? args : [FIXED])); }
+      static now() { return FIXED; }
+    };
+    Date.parse = RealDate.parse;
+    Date.UTC = RealDate.UTC;
+  } catch (e) { /* a page that froze Date itself is left alone */ }
+  try {
+    let seed = 42;
+    Math.random = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+  } catch (e) { /* non-writable Math.random */ }
+  try {
+    const style = document.createElement('style');
+    style.textContent =
+      '*,*::before,*::after{animation:none!important;transition:none!important;' +
+      'animation-duration:0s!important;caret-color:transparent!important}';
+    document.head && document.head.appendChild(style);
+  } catch (e) { /* no head yet */ }
+}
+"""
+
+
+async def freeze_dynamic_rendering(page: Any) -> bool:
+    """Seed a fixed clock and RNG and disable animation on ``page``.
+
+    Returns whether the seeding took. Deterministic seeding removes the largest
+    remaining class of false positives after third-party blocking: a page that
+    renders "2 minutes ago" produces a different image every single run.
+    """
+    try:
+        await page.evaluate(FREEZE_SCRIPT)
+        return True
+    except Exception as exc:
+        log.debug("could not freeze dynamic rendering: %s", exc)
+        return False
+
+
+async def dynamic_locators(page: Any, extra: Sequence[str] = ()) -> list[Any]:
+    """Locators for dynamic regions that should be masked before a capture.
+
+    Only selectors that actually match anything are returned, so the mask list
+    handed to Playwright stays as small as the page requires.
+    """
+    locators: list[Any] = []
+    for selector in tuple(DYNAMIC_CONTENT_SELECTORS) + tuple(extra):
+        if not selector:
+            continue
+        try:
+            locator = page.locator(selector)
+            if await locator.count() > 0:
+                locators.append(locator)
+        except Exception:
+            # A selector the target's DOM makes invalid is skipped rather than
+            # failing the capture; the rest of the mask list still applies.
+            continue
+    return locators
+
 
 async def sensitive_locators(page: Any) -> list[Any]:
     """Locators for every sensitive control currently on the page."""

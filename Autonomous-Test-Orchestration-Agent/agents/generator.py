@@ -39,7 +39,7 @@ from typing import Any, Sequence
 
 from browser.crawler import inventory_for_url
 from browser.sandbox import validate_test_source
-from browser.selectors import escape_py_string, resolve_target
+from browser.selectors import assess_fragility, escape_py_string, resolve_target
 from browser.session import BrowserSession
 from config import Settings, get_settings
 from graph.runtime import RunContext
@@ -55,6 +55,7 @@ from llm.client import LLMClient, ModelRole
 from llm.json_utils import JSONParseError
 from llm.prompts import GENERATOR_SYSTEM, generator_user
 from logging_setup import get_logger
+from safe_actions import ActionDecision, SafetyPolicy, evaluate_action
 from security import assert_no_secret_literals, redact_text, sanitize_url
 
 log = get_logger("aivor.generator")
@@ -313,6 +314,82 @@ def _resolved_value(step: TestStep) -> str:
 # ==========================================================================
 # Code generation
 # ==========================================================================
+def screen_flow_for_safety(
+    flow: TestFlow, policy: SafetyPolicy
+) -> tuple[dict[int, ActionDecision], list[str]]:
+    """Classify every step of ``flow`` against safe mode before any code exists.
+
+    Returns the blocked steps keyed by index, and the human-readable reasons.
+    Screening happens here - before generation, not during execution - so that
+    a blocked action never reaches a test file in the first place, and so the
+    report can state which flows were reduced and why.
+    """
+    blocked: dict[int, ActionDecision] = {}
+    reasons: list[str] = []
+    for index, step in enumerate(flow.steps):
+        # Assertions observe; they never change server state, so they are never
+        # destructive no matter what words the target text happens to contain.
+        if step.action in ASSERTION_ACTIONS or step.action == "screenshot":
+            continue
+        decision = evaluate_action(policy, step.description, step.target, step.value)
+        if decision.blocked:
+            blocked[index] = decision
+            reasons.append(f"step {index + 1} ({step.action}): {decision.detail}")
+    return blocked, reasons
+
+
+def is_simple_flow(flow: TestFlow, validations: Sequence[SelectorValidation]) -> bool:
+    """Whether the deterministic compiler can render this flow without a model.
+
+    "Simple" means every interactive step resolved to a validated locator and
+    the flow uses only the verb vocabulary the compiler covers. Under those
+    conditions the compiler's output and the model's output are the same
+    program, so the model call buys nothing and costs a request against a
+    rate-limited tier.
+
+    A flow with an unresolved locator is *not* simple: that is exactly where a
+    model's ability to work around a missing element earns its cost.
+    """
+    if not flow.steps:
+        return False
+    by_index = {v.step_index: v for v in validations}
+    for index, step in enumerate(flow.steps):
+        if step.action == "goto" or step.action in ASSERTION_ACTIONS or step.action == "screenshot":
+            continue
+        if step.action not in INTERACTIVE_ACTIONS:
+            return False
+        validation = by_index.get(index)
+        if validation is None or not validation.valid:
+            return False
+    return True
+
+
+def fragility_report(validations: Sequence[SelectorValidation]) -> list[dict[str, Any]]:
+    """Grade every chosen locator for durability across releases.
+
+    Reported per flow so a reader can tell a test that genuinely covers a flow
+    from one that resolves today and will need re-healing after the next
+    re-skin. A locator that works but depends on generated class names is
+    exactly the thing worth flagging before it becomes maintenance debt.
+    """
+    graded: list[dict[str, Any]] = []
+    for validation in validations:
+        if not validation.valid or not validation.chosen:
+            continue
+        match_count = 1
+        for candidate in validation.candidates:
+            if candidate.expression == validation.chosen:
+                match_count = max(1, candidate.match_count)
+                break
+        assessment = assess_fragility(
+            validation.chosen_strategy or "css", validation.chosen, match_count
+        )
+        assessment["step_index"] = validation.step_index
+        assessment["intent"] = validation.intent
+        graded.append(assessment)
+    return graded
+
+
 async def generate_test(
     ctx: RunContext,
     llm: LLMClient,
@@ -347,6 +424,63 @@ async def generate_test(
             f"{len(unresolved)} interactive step(s) could not be resolved against the "
             "live page; the test is generated defensively around them"
         )
+
+    # Safe mode screens the flow before a single line of code exists. A blocked
+    # step is compiled into an explicit raise rather than dropped, so the test
+    # fails loudly with the reason instead of passing over a flow it skipped.
+    safety = SafetyPolicy.from_settings(cfg)
+    blocked_steps, blocked_reasons = screen_flow_for_safety(flow, safety)
+    if blocked_steps:
+        result.blocked_actions = [d.audit() for d in blocked_steps.values()]
+        result.warnings.extend(blocked_reasons)
+        ctx.emit(
+            "generator",
+            "decision",
+            f"{flow.id}: {len(blocked_steps)} step(s) blocked by safe mode",
+            detail="; ".join(blocked_reasons)[:400],
+            flow_id=flow.id,
+            needs_human_review=True,
+        )
+
+    # Deterministic compilation for a flow the compiler covers completely. This
+    # is the single largest LLM saving in the pipeline: codegen runs once per
+    # flow, and most flows are ordinary click/fill/assert sequences whose every
+    # locator was already validated against the live DOM.
+    if cfg.prefer_deterministic_codegen and is_simple_flow(flow, validations):
+        compiled, warnings, blocking = compile_steps_to_source(
+            flow, validations, blocked_steps=blocked_steps
+        )
+        if blocking is None:
+            verdict = validate_test_source(compiled)
+            if not verdict.ok:
+                # The compiler produced something the sandbox audit rejects.
+                # That is a bug in the compiler, not a reason to ship the file:
+                # fail the flow loudly rather than fall through to the model and
+                # hide it.
+                result.valid = False
+                result.validation_error = verdict.summary()
+                result.source = compiled
+                return result
+            result.warnings.extend(warnings)
+            result.warnings.extend(verdict.warnings)
+            result.source = compiled
+            result.selector_validations = list(validations)
+            result.selector_fragility = fragility_report(validations)
+            result.generated_by_model = "deterministic-compiler"
+            result.warnings.append(
+                "compiled deterministically: every interactive step resolved to a "
+                "validated locator, so no model call was made for this flow"
+            )
+            ctx.emit(
+                "generator",
+                "decision",
+                f"{flow.id}: compiled without a model call",
+                detail="all locators validated; deterministic compilation is equivalent here",
+                flow_id=flow.id,
+            )
+            return result
+        # Fall through to the model when the compiler cannot render the flow.
+        log.info("flow %s not compilable deterministically: %s", flow.id, blocking)
 
     messages = [
         {"role": "system", "content": GENERATOR_SYSTEM},
@@ -451,6 +585,7 @@ async def generate_test(
 
     result.source = source
     result.selector_validations = list(validations)
+    result.selector_fragility = fragility_report(validations)
     result.valid = True
     return result
 
@@ -487,6 +622,7 @@ def _strip_imports(source: str) -> str:
 def compile_steps_to_source(
     flow: TestFlow,
     validations: Sequence[SelectorValidation],
+    blocked_steps: dict[int, ActionDecision] | None = None,
 ) -> tuple[str, list[str], str | None]:
     """Render validated steps + resolved locators into Playwright source.
 
@@ -494,6 +630,11 @@ def compile_steps_to_source(
     when a required interactive step has no resolvable locator: rather than
     emit a test that only pretends to exercise the flow, the flow is reported
     as un-generatable and shows up in the report as a remaining coverage gap.
+
+    ``blocked_steps`` names steps safe mode refused. Each is compiled into an
+    explicit ``raise`` carrying the reason, never omitted: a test that silently
+    dropped its checkout step and then reported success would be claiming
+    coverage of a flow nobody exercised.
     """
     lines: list[str] = [
         "async def test_flow(page, ctx):",
@@ -501,6 +642,7 @@ def compile_steps_to_source(
     ]
     warnings: list[str] = []
     by_index = {v.step_index: v for v in validations}
+    blocked = blocked_steps or {}
     asserted = False
 
     for index, step in enumerate(flow.steps):
@@ -508,6 +650,17 @@ def compile_steps_to_source(
         locator = validation.chosen if (validation and validation.valid) else None
         comment = f"    # step {index + 1}: {step.description or step.action}"
         lines.append(comment)
+
+        decision = blocked.get(index)
+        if decision is not None:
+            lines.append(
+                f'    raise AssertionError("BLOCKED BY SAFE MODE: '
+                f'{escape_py_string(decision.detail)}")'
+            )
+            warnings.append(
+                f"step {index + 1} was not executed: {decision.detail}"
+            )
+            break
 
         if step.action == "goto":
             url = step.target or step.value or flow.url

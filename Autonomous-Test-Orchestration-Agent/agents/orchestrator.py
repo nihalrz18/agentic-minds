@@ -28,6 +28,7 @@ from typing import Any, Sequence
 
 from browser.session import BrowserSession
 from config import REPLAN_CAP, Settings, ensure_dirs, get_settings, run_dir
+from safe_actions import SafetyPolicy, describe_policy
 from differentiation.prd_gap import analyse_prd_gaps, summarise_gaps
 from differentiation.regression_radar import record as record_radar
 from graph.runtime import RunContext, create_context, drop_context
@@ -361,6 +362,27 @@ async def route_after_coverage(
         ),
         "feedback": evaluation.feedback,
     }
+
+    # Deterministic short-circuit. The model's only remaining freedom here is
+    # "replan" versus "escalate" - a failed gate can never be waved through, as
+    # the coercion below enforces. On any re-plan except the last affordable
+    # one, replanning is unambiguously correct: budget remains, and escalating
+    # early would surrender coverage the agent is still able to win. Spending a
+    # 70B call to confirm that is pure cost, so the call is skipped and the
+    # deterministic route stands.
+    if replan_count < REPLAN_CAP - 1:
+        decision["rationale"] += " Routed deterministically; no model call was needed."
+        ctx.emit(
+            "coverage_gate",
+            "decision",
+            f"Re-plan {replan_count + 1}/{REPLAN_CAP} routed deterministically",
+            detail="the gate failed with budget remaining, which admits only one action",
+            confidence=decision["confidence"],
+        )
+        if not str(decision["feedback"]).strip():
+            decision["feedback"] = evaluation.feedback or "Add edge-case and error-state coverage."
+        return decision
+
     try:
         payload = await llm.complete_json(
             ModelRole.REASONING,
@@ -461,15 +483,53 @@ async def synthesise_report(
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
+    # Fold the cost, timing and safety accounting into the state the report is
+    # assembled from. Doing it here rather than in the assembler keeps the
+    # assembler a pure projection of state, which is what makes it testable.
+    enriched = dict(state)
+    if llm is not None:
+        enriched["llm_cost"] = llm.cost_summary()
+    enriched["safety"] = _safety_summary(state, cfg)
+
     return assemble_report(
         run_id=ctx.run_id,
         target_url=state.get("target_url", ""),
-        state_like=state,
+        state_like=enriched,
         synthesis=synthesis,
         llm_provider=(llm.primary_name if llm else "unavailable"),
         models_used=(llm.models_used() if llm else {}),
         settings=cfg,
     )
+
+
+def _safety_summary(state: dict[str, Any], cfg: Settings) -> dict[str, Any]:
+    """The policy the run executed under, and everything it refused.
+
+    A report that omits what was blocked is claiming coverage it does not have:
+    a checkout flow that safe mode reduced to a raised assertion is not a
+    tested checkout flow, and the reader has to be told so.
+    """
+    site_map = state.get("site_map")
+    blocked_navigations = list(getattr(site_map, "blocked_targets", []) or [])
+
+    blocked_actions: list[dict[str, Any]] = []
+    for test in state.get("generated_tests") or []:
+        for entry in getattr(test, "blocked_actions", []) or []:
+            blocked_actions.append({"flow_id": getattr(test, "flow_id", ""), **entry})
+
+    return {
+        "target_policy": {
+            "allow_private_targets": cfg.allow_private_targets,
+            "allow_insecure_tls": cfg.allow_insecure_tls,
+            "allowlist": list(cfg.target_allowlist),
+            "resolve_dns": cfg.target_resolve_dns,
+        },
+        "safe_mode": describe_policy(SafetyPolicy.from_settings(cfg)),
+        "blocked_navigations": blocked_navigations[:50],
+        "blocked_actions": blocked_actions[:50],
+        "blocked_navigation_count": len(blocked_navigations),
+        "blocked_action_count": len(blocked_actions),
+    }
 
 
 def _report_facts(state: dict[str, Any]) -> dict[str, Any]:

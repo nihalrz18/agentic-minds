@@ -32,6 +32,7 @@ a human to look at an image, not a build failure.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,14 +122,134 @@ def _host_slug(target_url: str) -> str:
     return _slugify(label, "unknown-host")
 
 
-def baseline_path_for(target_url: str, flow_id: str, viewport: str) -> Path:
-    """Where the cross-run reference image for one flow+viewport lives.
+@dataclass(frozen=True)
+class BaselineIdentity:
+    """Everything that must match for two screenshots to be comparable.
 
-    ``reports/baselines/<host>/<flow_id>__<viewport>.png``. The parent directory
-    is created lazily here so that callers can ask for the path (to test whether
-    a baseline exists) without having to know about directory creation.
+    A baseline is only a valid reference for a capture taken under the same
+    conditions. Comparing a staging capture against a production baseline, or a
+    Chrome 128 capture against Chrome 131, produces diffs that are real pixel
+    differences and entirely uninteresting - which is how visual regression
+    suites end up ignored.
+
+    The build identifier is recorded but deliberately *not* part of the key: a
+    baseline exists precisely to be compared across builds. Everything else -
+    environment, locale, theme, viewport, browser version, masking rules - does
+    key the baseline, because a difference in any of them makes the comparison
+    meaningless rather than informative.
+    """
+
+    environment: str = "default"
+    locale: str = "en-US"
+    theme: str = "light"
+    viewport: str = "1280x900"
+    browser: str = "chromium"
+    browser_version: str = ""
+    mask_signature: str = ""
+    build_id: str = ""
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Any,
+        *,
+        viewport: str = "",
+        browser_version: str = "",
+        theme: str = "light",
+    ) -> "BaselineIdentity":
+        masks = tuple(getattr(settings, "visual_mask_selectors", ()) or ())
+        return cls(
+            environment=str(getattr(settings, "visual_environment", "default") or "default"),
+            locale=str(getattr(settings, "visual_locale", "en-US") or "en-US"),
+            theme=theme,
+            viewport=viewport
+            or f"{getattr(settings, 'viewport_width', 0)}x{getattr(settings, 'viewport_height', 0)}",
+            browser="chromium",
+            browser_version=browser_version,
+            mask_signature=mask_signature(masks),
+            build_id=str(getattr(settings, "visual_build_id", "") or ""),
+        )
+
+    def key(self) -> str:
+        """Short, stable directory-safe token identifying these conditions."""
+        material = "|".join(
+            [
+                self.environment,
+                self.locale,
+                self.theme,
+                self.viewport,
+                self.browser,
+                _major_version(self.browser_version),
+                self.mask_signature,
+            ]
+        )
+        digest = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:10]
+        return f"{_slugify(self.environment, 'env')}-{_slugify(self.theme, 'light')}-{digest}"
+
+    def describe(self) -> dict[str, str]:
+        """Provenance recorded alongside the baseline and cited in the report."""
+        return {
+            "environment": self.environment,
+            "locale": self.locale,
+            "theme": self.theme,
+            "viewport": self.viewport,
+            "browser": self.browser,
+            "browser_version": self.browser_version,
+            "browser_major": _major_version(self.browser_version),
+            "mask_signature": self.mask_signature,
+            "build_id": self.build_id,
+            "key": self.key(),
+        }
+
+
+def _major_version(version: str) -> str:
+    """Major browser version only.
+
+    Chromium repaints subtly between patch releases but not in ways that should
+    invalidate a baseline; a major version bump routinely does. Keying on the
+    major alone keeps baselines useful for longer without making them wrong.
+    """
+    text = (version or "").strip()
+    if not text:
+        return ""
+    return text.split(".", 1)[0]
+
+
+def mask_signature(selectors: Sequence[str]) -> str:
+    """Stable hash of the masking rules in force.
+
+    Part of baseline identity because a capture with a masked price banner and
+    one without are different images by construction; comparing them would
+    report the mask itself as a regression.
+    """
+    if not selectors:
+        return "none"
+    material = "|".join(sorted(str(s).strip() for s in selectors if str(s).strip()))
+    if not material:
+        return "none"
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def baseline_path_for(
+    target_url: str,
+    flow_id: str,
+    viewport: str,
+    identity: BaselineIdentity | None = None,
+) -> Path:
+    """Where the cross-run reference image for one flow lives.
+
+    ``reports/baselines/<host>/<identity>/<flow_id>__<viewport>.png``. The
+    parent directory is created lazily here so that callers can ask for the path
+    (to test whether a baseline exists) without having to know about directory
+    creation.
+
+    ``identity`` is optional so that existing callers keep working; when it is
+    omitted the legacy flat layout is used, which is what the baselines already
+    on disk from previous runs are stored under.
     """
     directory = BASELINES_DIR / _host_slug(target_url)
+    if identity is not None:
+        directory = directory / identity.key()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:  # pragma: no cover - read-only volume / permissions
@@ -446,6 +567,12 @@ def analyse(
     threshold = float(cfg.visual_diff_threshold)
     tolerance = int(cfg.visual_pixel_tolerance)
     safe_target = sanitize_url(target_url or "")
+    # Baselines are keyed by the conditions the capture was taken under, so a
+    # staging frame is never diffed against a production reference and a browser
+    # major-version bump starts a fresh baseline instead of reporting every page
+    # as changed.
+    identity = BaselineIdentity.from_settings(cfg, viewport=viewport)
+    log.info("visual baseline identity: %s", identity.describe())
 
     names: dict[str, str] = {flow.id: flow.name for flow in flows}
     visual_dir = Path(run_directory) / "visual"
@@ -495,7 +622,7 @@ def analyse(
                 )
                 continue
 
-            baseline = baseline_path_for(target_url, flow_id, viewport)
+            baseline = baseline_path_for(target_url, flow_id, viewport, identity)
 
             # ---- no reference yet: establish one, but only from a green run ----
             if not baseline.exists():

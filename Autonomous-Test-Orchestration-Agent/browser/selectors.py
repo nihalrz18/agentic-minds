@@ -161,6 +161,114 @@ def strategy_rank(strategy: str) -> int:
         return len(STRATEGY_PRIORITY)
 
 
+# How durable each strategy is across releases of the application under test.
+# This is a statement about *maintenance cost*, not about whether the locator
+# currently resolves: a CSS path resolves perfectly today and breaks the moment
+# somebody reorders a div.
+STRATEGY_FRAGILITY: dict[str, tuple[str, str]] = {
+    "testid": (
+        "stable",
+        "a dedicated test attribute exists precisely so that markup can change "
+        "without breaking this test",
+    ),
+    "role": (
+        "stable",
+        "accessible role and name track what the control *is*, which changes far "
+        "less often than how it is styled",
+    ),
+    "label": (
+        "stable",
+        "the visible label is part of the product's contract with its users",
+    ),
+    "placeholder": (
+        "moderate",
+        "placeholder text is copy, and copy is edited without ceremony",
+    ),
+    "alt": ("moderate", "alt text is copy and is frequently revised"),
+    "title": ("moderate", "title attributes are copy and are often removed outright"),
+    "text": (
+        "fragile",
+        "matches on visible copy, so any wording change - including a translation "
+        "or a typo fix - breaks this test",
+    ),
+    "css": (
+        "fragile",
+        "depends on document structure and class names, both of which change "
+        "whenever the markup or the styling is refactored",
+    ),
+}
+
+#: Class-name fragments that mark a CSS selector as machine-generated, and so
+#: guaranteed to change on the next build of the target application.
+_GENERATED_CLASS_RE = re.compile(
+    r"(?:^|[.\s_-])(?:css|sc|jsx|styled|emotion|mui|chakra|tw)-[a-z0-9]{4,}"
+    r"|[.#][a-z]*[0-9a-f]{6,}\b"
+    r"|:nth-(?:child|of-type)\(",
+    re.I,
+)
+
+
+def assess_fragility(strategy: str, expression: str, match_count: int = 1) -> dict[str, Any]:
+    """Describe how likely one chosen locator is to break on the next release.
+
+    Returned verbatim into the report so that a reader can tell a test that
+    genuinely covers a flow from one that will need re-healing next sprint. The
+    grade is deliberately independent of whether the locator resolved: a
+    fragile locator that works today is exactly the thing worth flagging.
+    """
+    grade, rationale = STRATEGY_FRAGILITY.get(
+        strategy, ("fragile", "unrecognised strategy; treated as fragile")
+    )
+    notes: list[str] = []
+
+    if strategy == "css" and _GENERATED_CLASS_RE.search(expression or ""):
+        grade = "fragile"
+        notes.append(
+            "the selector depends on a generated class name or positional index, "
+            "which changes on every build"
+        )
+    if match_count > 1:
+        grade = "fragile" if grade != "fragile" else grade
+        notes.append(
+            f"the locator matches {match_count} elements, so it is resolved by "
+            "position and will silently target a different element if the order changes"
+        )
+
+    return {
+        "strategy": strategy,
+        "expression": expression,
+        "grade": grade,
+        "rationale": rationale,
+        "notes": notes,
+        "recommendation": (
+            ""
+            if grade == "stable"
+            else "add a data-testid to this element to make the test durable"
+        ),
+    }
+
+
+def fragility_summary(assessments: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-step fragility into a per-suite headline."""
+    counts = {"stable": 0, "moderate": 0, "fragile": 0}
+    for item in assessments:
+        grade = str(item.get("grade") or "fragile")
+        counts[grade] = counts.get(grade, 0) + 1
+    total = sum(counts.values())
+    return {
+        "counts": counts,
+        "total": total,
+        "fragile_ratio": round(counts["fragile"] / total, 3) if total else 0.0,
+        "verdict": (
+            "durable"
+            if total and counts["fragile"] == 0
+            else "some selectors will need maintenance"
+            if total
+            else "no selectors resolved"
+        ),
+    }
+
+
 def expression_for(strategy: str, value: str, *, role: str | None = None) -> str:
     """Render the Playwright Python source for one locator strategy.
 

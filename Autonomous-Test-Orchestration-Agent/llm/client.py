@@ -31,6 +31,7 @@ import httpx
 from pydantic import BaseModel
 
 from config import Settings, get_settings
+from llm.cache import MetricsRecorder, ResponseCache, make_key
 from llm.json_utils import (
     JSONParseError,
     build_retry_messages,
@@ -43,6 +44,21 @@ log = get_logger("aivor.llm")
 
 T = TypeVar("T", bound=BaseModel)
 Message = dict[str, str]
+
+
+def stage_of(task: str) -> str:
+    """Pipeline stage a task label belongs to.
+
+    Task labels are already namespaced as ``"<stage>:<detail>"``
+    (``"generator:F001"``, ``"coverage_gate:rev0"``), so the stage is the
+    prefix. An unlabelled call is attributed to ``unattributed`` rather than
+    being dropped, so a missing label shows up in the report as a gap in the
+    accounting instead of silently costing nothing.
+    """
+    text = (task or "").strip()
+    if not text:
+        return "unattributed"
+    return text.split(":", 1)[0]
 
 
 class ModelRole(str, Enum):
@@ -327,6 +343,11 @@ class LLMClient:
         self.usage_by_model: dict[str, LLMUsage] = {}
         self.call_count = 0
         self.failure_count = 0
+        self.cache = ResponseCache(
+            max_entries=self.settings.llm_cache_max_entries,
+            enabled=self.settings.llm_cache_enabled,
+        )
+        self.metrics = MetricsRecorder()
         self._throttles = {
             ModelRole.REASONING: _RoleThrottle(float(os.getenv("REASONING_MIN_INTERVAL_S", "1.2"))),
             ModelRole.CODEGEN: _RoleThrottle(float(os.getenv("CODEGEN_MIN_INTERVAL_S", "0.35"))),
@@ -414,6 +435,14 @@ class LLMClient:
             response.used_fallback = index > 0
             self.call_count += 1
             self.usage_by_model.setdefault(response.model, LLMUsage()).add(response.usage)
+            self.metrics.record_call(
+                stage_of(task),
+                model=response.model,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                latency_s=response.latency_s,
+                attempts=response.attempts,
+            )
             log.debug(
                 "llm task=%s role=%s model=%s tokens=%s latency=%.2fs",
                 task,
@@ -424,7 +453,67 @@ class LLMClient:
             )
             return response
 
+        self.metrics.record_failure(stage_of(task))
         raise LLMUnavailableError("all providers failed -> " + " | ".join(errors))
+
+    async def complete_json_cached(
+        self,
+        role: ModelRole,
+        messages: Sequence[Message],
+        *,
+        cache_task: str,
+        url: str,
+        fingerprint: str,
+        cache_extra: Any = None,
+        model_cls: Type[T] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        task: str = "",
+    ) -> Any:
+        """:meth:`complete_json`, memoised on the page's DOM fingerprint.
+
+        Callers supply the page identity rather than letting the cache hash the
+        prompt: two prompts that differ only in a timestamp or an ordering
+        should still hit, and two identical prompts about a page whose markup
+        changed must *miss*. See :mod:`llm.cache`.
+
+        A fingerprint-free call (empty ``fingerprint``) bypasses the cache
+        entirely rather than caching under a weak key.
+        """
+        stage = stage_of(task or cache_task)
+        if not fingerprint:
+            return await self.complete_json(
+                role,
+                messages,
+                model_cls=model_cls,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                task=task,
+            )
+
+        key = make_key(cache_task, url, fingerprint, cache_extra)
+        hit, cached = self.cache.get(key)
+        if hit:
+            self.metrics.record_cache_hit(stage)
+            log.debug("cache hit for task=%s url=%s fp=%s", cache_task, url, fingerprint)
+            return cached
+
+        value = await self.complete_json(
+            role,
+            messages,
+            model_cls=model_cls,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            task=task,
+        )
+        self.cache.put(key, value)
+        return value
+
+    def cost_summary(self) -> dict[str, Any]:
+        """Per-stage token, cost, latency, retry and cache-hit accounting."""
+        summary = self.metrics.summary()
+        summary["cache"] = self.cache.stats.as_dict()
+        return summary
 
     async def complete_json(
         self,

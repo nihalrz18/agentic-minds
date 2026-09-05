@@ -11,12 +11,15 @@ created from that file and no downstream component ever needs the password.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from config import Settings, get_settings
 from logging_setup import get_logger
+from security import sanitize_url
+from target_policy import TargetPolicy, evaluate_target, log_decision
 
 log = get_logger("aivor.session")
 
@@ -98,9 +101,12 @@ class BrowserSession:
                 "height": self.settings.viewport_height,
             },
             "user_agent": DEFAULT_USER_AGENT,
-            "ignore_https_errors": True,
-            "locale": "en-US",
-            "timezone_id": "UTC",
+            # Certificate errors are fatal unless the operator opted in. A test
+            # target served over a broken TLS chain may be an interception, and
+            # silently accepting it would mean typing credentials into it.
+            "ignore_https_errors": self.settings.allow_insecure_tls,
+            "locale": self.settings.visual_locale,
+            "timezone_id": self.settings.visual_timezone,
             # Freeze the clock-driven parts of a page so visual baselines are
             # comparable between runs.
             "reduced_motion": "reduce",
@@ -126,6 +132,153 @@ class BrowserSession:
                 await context.close()
             except Exception:  # pragma: no cover
                 log.debug("context close failed", exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# Target admission guard
+# --------------------------------------------------------------------------
+class NavigationGuard:
+    """Re-applies the target policy to every navigation the browser attempts.
+
+    A pre-flight check on the operator-supplied URL is not sufficient. The
+    browser follows redirects on its own, so ``https://public.example`` may end
+    up fetching ``http://127.0.0.1:9200``; a link on a crawled page may point
+    anywhere; and a name may resolve differently on a later lookup. Each of
+    those is a fresh navigation request, and each one is checked here.
+
+    Only *navigation* requests are gated. Subresources (images, XHR, fonts) are
+    left alone: blocking those would break the rendering the agent is there to
+    observe, and they cannot redirect the top-level document to a new origin.
+
+    Decisions are memoised per URL for the lifetime of the guard so that a
+    crawl of 12 pages on one host performs one name resolution, not twelve.
+    """
+
+    def __init__(self, policy: TargetPolicy, *, context_label: str = "navigation") -> None:
+        self.policy = policy
+        self.context_label = context_label
+        self.blocked: list[dict[str, Any]] = []
+        self._cache: dict[str, bool] = {}
+        self._lock = asyncio.Lock()
+
+    async def allows(self, url: str) -> bool:
+        """Whether ``url`` may be navigated to, resolving DNS off the event loop."""
+        async with self._lock:
+            cached = self._cache.get(url)
+        if cached is not None:
+            return cached
+        decision = await asyncio.to_thread(evaluate_target, url, self.policy)
+        log_decision(decision, context=self.context_label)
+        if not decision.allowed:
+            self.blocked.append(decision.audit())
+        async with self._lock:
+            self._cache[url] = decision.allowed
+        return decision.allowed
+
+    async def handle(self, route: Any, request: Any) -> None:
+        """Playwright route handler: abort inadmissible navigations."""
+        try:
+            is_navigation = bool(request.is_navigation_request())
+            url = request.url
+        except Exception:  # pragma: no cover - request already torn down
+            await route.continue_()
+            return
+        if not is_navigation:
+            await route.continue_()
+            return
+        if await self.allows(url):
+            await route.continue_()
+            return
+        log.warning(
+            "aborting navigation to %s: refused by the target policy",
+            sanitize_url(url),
+        )
+        await route.abort("blockedbyclient")
+
+
+async def install_navigation_guard(
+    context: Any,
+    policy: TargetPolicy | None = None,
+    *,
+    settings: Settings | None = None,
+    context_label: str = "navigation",
+) -> NavigationGuard:
+    """Attach a :class:`NavigationGuard` to every request on ``context``."""
+    cfg = settings or get_settings()
+    guard = NavigationGuard(policy or TargetPolicy.from_settings(cfg), context_label=context_label)
+    await context.route("**/*", guard.handle)
+    return guard
+
+
+# Hosts and path fragments that serve analytics, advertising, session replay and
+# chat widgets. They are the dominant source of false-positive visual diffs (a
+# rotating ad creative changes every capture) and they slow every page load.
+THIRD_PARTY_BLOCKLIST: tuple[str, ...] = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googleadservices.com",
+    "facebook.net",
+    "facebook.com/tr",
+    "connect.facebook",
+    "hotjar.com",
+    "hotjar.io",
+    "fullstory.com",
+    "mouseflow.com",
+    "clarity.ms",
+    "segment.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "intercom.io",
+    "intercomcdn.com",
+    "drift.com",
+    "crisp.chat",
+    "tawk.to",
+    "zendesk.com/embeddable",
+    "livechatinc.com",
+    "sentry.io",
+    "bugsnag.com",
+    "newrelic.com",
+    "nr-data.net",
+    "optimizely.com",
+    "adroll.com",
+    "criteo.com",
+    "taboola.com",
+    "outbrain.com",
+    "scorecardresearch.com",
+    "quantserve.com",
+)
+
+
+async def install_third_party_blocker(
+    context: Any, extra: tuple[str, ...] = ()
+) -> list[str]:
+    """Block analytics, ad and chat-widget traffic on ``context``.
+
+    Returns the list of blocked URLs, which the visual report cites as evidence
+    that a diff was compared against a page with the noisy surfaces removed.
+    """
+    blocked: list[str] = []
+    patterns = THIRD_PARTY_BLOCKLIST + tuple(extra)
+
+    async def _handle(route: Any, request: Any) -> None:
+        try:
+            url = request.url
+        except Exception:  # pragma: no cover
+            await route.continue_()
+            return
+        lowered = url.lower()
+        if any(fragment in lowered for fragment in patterns):
+            if len(blocked) < 200:
+                blocked.append(url)
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
+
+    await context.route("**/*", _handle)
+    return blocked
 
 
 def attach_console_capture(page: Any, sink: list[str], limit: int = 50) -> None:

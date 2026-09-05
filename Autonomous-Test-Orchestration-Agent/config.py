@@ -37,13 +37,16 @@ GENERATED_TESTS_DIRNAME: Final[str] = "generated_tests"
 # --------------------------------------------------------------------------
 # Model routing.
 #
-# Rate-limit awareness is a hard requirement: the 70B model is reserved for
+# Rate-limit awareness is a hard requirement: the large model is reserved for
 # judgment (coverage evaluation, risk ranking, defect classification,
 # confidence scoring, orchestrator routing) and the small model does the
-# mechanical plan-to-code translation. Never burn 70B on codegen.
+# mechanical plan-to-code translation. Never burn the large model on codegen.
+#
+# The former llama-3.3-70b / llama-3.1-8b defaults were decommissioned by Groq
+# and now answer HTTP 404 model_not_found, so the gpt-oss pair is the default.
 # --------------------------------------------------------------------------
-MODEL_REASONING: Final[str] = "llama-3.3-70b-versatile"
-MODEL_CODEGEN: Final[str] = "llama-3.1-8b-instant"
+MODEL_REASONING: Final[str] = "openai/gpt-oss-120b"
+MODEL_CODEGEN: Final[str] = "openai/gpt-oss-20b"
 MODEL_CODEGEN_ALT: Final[str] = "openai/gpt-oss-20b"
 
 GROQ_BASE_URL: Final[str] = "https://api.groq.com/openai/v1"
@@ -102,6 +105,20 @@ def _env_str(name: str, default: str) -> str:
     return default if raw is None or raw.strip() == "" else raw.strip()
 
 
+def _env_tuple(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Parse a comma/semicolon-separated list env var into a tuple.
+
+    Used for the target allowlist and the authorised destructive-action
+    categories, both of which are naturally lists and must default to empty
+    (deny-all / authorise-nothing) rather than to a permissive value.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    parts = [chunk.strip() for chunk in raw.replace(";", ",").split(",")]
+    return tuple(p for p in parts if p)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable runtime configuration.
@@ -129,12 +146,50 @@ class Settings:
     stamped ``llm_provider = "offline-stub"`` in the report and carries a loud
     limitation entry. It is NOT the real agent."""
 
+    # ---- Target admission policy (see target_policy.py) -------------------
+    allow_private_targets: bool = False
+    """Explicit override permitting loopback/private/link-local targets.
+
+    Off by default: the agent resolves an operator-supplied hostname and drives
+    a browser at it, so an unrestricted default turns the service into an SSRF
+    proxy for anything reachable from the host. Cloud metadata endpoints are
+    blocked even when this is on."""
+    allow_insecure_tls: bool = False
+    """Opt-in to ignoring TLS certificate errors during navigation.
+
+    Off by default so a man-in-the-middle on a test target is a loud failure
+    rather than a silent one. Turn on only for a staging box with a self-signed
+    certificate."""
+    target_allowlist: tuple[str, ...] = ()
+    """Operator allowlist of testable hosts. Empty means "any public host".
+
+    Entries may be an exact host, a ``*.example.com`` wildcard, or a CIDR
+    block. An allowlist narrows what is reachable; it never relaxes the
+    address-class rules."""
+    target_resolve_dns: bool = True
+    """Resolve hostnames and classify every returned address before navigating."""
+
+    # ---- Safe mode (see safe_actions.py) ---------------------------------
+    safe_mode: bool = True
+    """Block irreversible actions (payment, checkout, delete, account closure,
+    password reset, outbound email) during both discovery and execution."""
+    authorized_destructive_actions: tuple[str, ...] = ()
+    """Destructive categories the operator has explicitly authorised, e.g.
+    ``("checkout", "payment")``. Ignored when ``safe_mode`` is false."""
+
     # ---- Crawl -----------------------------------------------------------
     crawl_max_pages: int = 12
     crawl_max_depth: int = 2
     crawl_page_timeout_ms: int = 20_000
     crawl_settle_ms: int = 700
     crawl_same_origin_only: bool = True
+    crawl_max_seconds: float = 240.0
+    """Wall-clock ceiling for the whole discovery phase."""
+    crawl_adaptive: bool = True
+    """Prioritise high-value surfaces instead of crawling in link order."""
+    crawl_interact: bool = True
+    """Expand menus, tabs, accordions and dialogs in a disposable context."""
+    crawl_max_interactions_per_page: int = 6
 
     # ---- Browser / execution --------------------------------------------
     headless: bool = True
@@ -151,10 +206,56 @@ class Settings:
     """Fraction of changed pixels above which a visual regression is reported."""
     visual_pixel_tolerance: int = 24
     """Per-channel 0-255 delta below which two pixels count as identical."""
+    visual_environment: str = "default"
+    """Environment label folded into baseline identity (``staging``, ``ci``...).
+
+    A baseline captured against staging is not a valid reference for
+    production: different data, different banners, different build."""
+    visual_build_id: str = ""
+    """Build/release identifier recorded with a baseline, for provenance."""
+    visual_locale: str = "en-US"
+    visual_timezone: str = "UTC"
+    visual_block_third_party: bool = True
+    """Block analytics, ad and chat-widget requests before capture. These are
+    the single largest source of false-positive visual diffs."""
+    visual_mask_selectors: tuple[str, ...] = ()
+    """Extra CSS selectors to mask before capture, on top of the built-in
+    dynamic-content heuristics (prices, dates, avatars, banners)."""
+    visual_freeze_time: bool = True
+    """Seed a fixed clock and RNG so time-dependent rendering is stable."""
 
     # ---- Generation ------------------------------------------------------
     max_flows_to_generate: int = 12
     selector_validation_candidates: int = 4
+    prefer_deterministic_codegen: bool = True
+    """Compile simple flows without calling a model at all.
+
+    The deterministic compiler already exists as the fallback path; for a flow
+    whose every step resolved to a validated locator there is nothing for a
+    model to add, and skipping the call removes the dominant per-flow cost."""
+
+    # ---- LLM cost controls ----------------------------------------------
+    llm_cache_enabled: bool = True
+    """Cache discovery and selector-resolution model answers, keyed by URL plus
+    a DOM fingerprint, so a re-run over an unchanged page costs nothing."""
+    llm_cache_max_entries: int = 512
+
+    # ---- Execution reliability ------------------------------------------
+    rerun_failed_flows: bool = True
+    """Re-run a failed high-risk flow exactly once, with jitter, to separate a
+    genuine defect from a timing flake. Bounded at one to keep runs finite."""
+    rerun_jitter_ms: int = 750
+
+    # ---- Operational limits ---------------------------------------------
+    max_contexts_per_run: int = 4
+    """Ceiling on concurrently open browser contexts within one run."""
+    per_target_concurrency: int = 1
+    """Concurrent runs permitted against a single host. More than one run
+    hammering one target is indistinguishable from a load test."""
+    target_rate_limit_per_s: float = 4.0
+    """Ceiling on navigations per second against a single host."""
+    run_time_budget_s: float = 1800.0
+    """Wall-clock ceiling for one whole run, after which it is cancelled."""
 
     # ---- Feature flags ---------------------------------------------------
     enable_prd_gap_analysis: bool = False
@@ -186,9 +287,35 @@ class Settings:
             llm_backoff_max_s=_env_float("LLM_BACKOFF_MAX_S", 45.0),
             llm_max_tokens=_env_int("LLM_MAX_TOKENS", 4096),
             llm_offline_mode=_env_bool("LLM_OFFLINE_MODE", False),
+            allow_private_targets=_env_bool("ALLOW_PRIVATE_TARGETS", False),
+            allow_insecure_tls=_env_bool("ALLOW_INSECURE_TLS", False),
+            target_allowlist=_env_tuple("TARGET_ALLOWLIST"),
+            target_resolve_dns=_env_bool("TARGET_RESOLVE_DNS", True),
+            safe_mode=_env_bool("SAFE_MODE", True),
+            authorized_destructive_actions=_env_tuple("AUTHORIZED_DESTRUCTIVE_ACTIONS"),
             crawl_max_pages=_env_int("CRAWL_MAX_PAGES", 12),
             crawl_max_depth=_env_int("CRAWL_MAX_DEPTH", 2),
             crawl_page_timeout_ms=_env_int("CRAWL_PAGE_TIMEOUT_MS", 20_000),
+            crawl_max_seconds=_env_float("CRAWL_MAX_SECONDS", 240.0),
+            crawl_adaptive=_env_bool("CRAWL_ADAPTIVE", True),
+            crawl_interact=_env_bool("CRAWL_INTERACT", True),
+            crawl_max_interactions_per_page=_env_int("CRAWL_MAX_INTERACTIONS_PER_PAGE", 6),
+            prefer_deterministic_codegen=_env_bool("PREFER_DETERMINISTIC_CODEGEN", True),
+            llm_cache_enabled=_env_bool("LLM_CACHE_ENABLED", True),
+            llm_cache_max_entries=_env_int("LLM_CACHE_MAX_ENTRIES", 512),
+            rerun_failed_flows=_env_bool("RERUN_FAILED_FLOWS", True),
+            rerun_jitter_ms=_env_int("RERUN_JITTER_MS", 750),
+            max_contexts_per_run=_env_int("MAX_CONTEXTS_PER_RUN", 4),
+            per_target_concurrency=_env_int("PER_TARGET_CONCURRENCY", 1),
+            target_rate_limit_per_s=_env_float("TARGET_RATE_LIMIT_PER_S", 4.0),
+            run_time_budget_s=_env_float("RUN_TIME_BUDGET_S", 1800.0),
+            visual_environment=_env_str("VISUAL_ENVIRONMENT", "default"),
+            visual_build_id=_env_str("VISUAL_BUILD_ID", ""),
+            visual_locale=_env_str("VISUAL_LOCALE", "en-US"),
+            visual_timezone=_env_str("VISUAL_TIMEZONE", "UTC"),
+            visual_block_third_party=_env_bool("VISUAL_BLOCK_THIRD_PARTY", True),
+            visual_mask_selectors=_env_tuple("VISUAL_MASK_SELECTORS"),
+            visual_freeze_time=_env_bool("VISUAL_FREEZE_TIME", True),
             headless=_env_bool("HEADLESS", True),
             viewport_width=_env_int("VIEWPORT_WIDTH", 1280),
             viewport_height=_env_int("VIEWPORT_HEIGHT", 900),
@@ -228,6 +355,9 @@ class Settings:
             "ENABLE_REGRESSION_RADAR": self.enable_regression_radar,
             "ENABLE_VISUAL_DIFF": self.enable_visual_diff,
             "LLM_OFFLINE_MODE": self.llm_offline_mode,
+            "SAFE_MODE": self.safe_mode,
+            "ALLOW_PRIVATE_TARGETS": self.allow_private_targets,
+            "ALLOW_INSECURE_TLS": self.allow_insecure_tls,
         }
 
     def safe_dict(self) -> dict[str, Any]:

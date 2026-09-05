@@ -23,11 +23,12 @@ curl -X POST localhost:8000/run -H 'Content-Type: application/json' \
 4. [Architecture](#architecture)
 5. [The rubrics](#the-rubrics)
 6. [Credentials and security](#credentials-and-security)
-7. [Rate limits and model routing](#rate-limits-and-model-routing)
-8. [Feature status: implemented / scaffolded / roadmap](#feature-status)
-9. [Known limitations](#known-limitations)
-10. [Evaluating agent quality over time](#evaluating-agent-quality-over-time)
-11. [Repository map](#repository-map)
+7. [Testing an arbitrary URL safely](#testing-an-arbitrary-url-safely)
+8. [Rate limits and model routing](#rate-limits-and-model-routing)
+9. [Feature status: implemented / scaffolded / roadmap](#feature-status)
+10. [Known limitations](#known-limitations)
+11. [Evaluating agent quality over time](#evaluating-agent-quality-over-time)
+12. [Repository map](#repository-map)
 
 ---
 
@@ -84,8 +85,8 @@ python -m venv .venv
 # Windows:        .venv\Scripts\activate
 # macOS / Linux:  source .venv/bin/activate
 
-pip install -r requirements.txt
-playwright install chromium
+
+
 
 cp .env.example .env        # Windows: copy .env.example .env
 ```
@@ -118,14 +119,26 @@ the agent**, and it is not a demo mode; it is a smoke test.
 
 ### API + UI (the demo path)
 
+<!-- # 1. Fetch the latest changes from the remote repository
+git fetch origin
+
+# 2. Merge the remote main branch into your current agent branch
+git merge origin/main -->
+
 Two terminals:
+```bash
+.\run_local.ps1
+```
 
 ```bash
 python -m uvicorn api.app:app --reload --port 8000
+ python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
 ```bash
 streamlit run ui/streamlit_app.py
+
+streamlit run ui/streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 Open the Streamlit page, enter a URL, press **Start autonomous run**, and watch
@@ -413,6 +426,116 @@ use a container if the target is not yours.
 
 ---
 
+---
+
+## Testing an arbitrary URL safely
+
+Pointing an autonomous agent at a URL somebody typed is not the same as opening
+that URL in a browser. The agent resolves the name, drives a real browser at it,
+follows its redirects, clicks controls it discovered seconds earlier, and then
+runs generated code against whatever answered — twice, once while exploring and
+again while executing. Three controls make that safe by default.
+
+### 1. Target admission policy — `target_policy.py`
+
+Every URL is admitted on **the address it resolves to**, never on how it looks.
+The check runs before the run starts *and again on every navigation and redirect
+hop*, because `https://public.example` is free to 302 to `http://127.0.0.1:9200`.
+
+| Address class | Default | Override |
+|---|---|---|
+| Public | allowed | — |
+| Loopback, private, link-local, unspecified | **blocked** | `ALLOW_PRIVATE_TARGETS=true` or `--allow-private` |
+| Reserved, multicast | **blocked** | none |
+| Cloud metadata (`169.254.169.254`, `metadata.google.internal`, …) | **blocked** | **none, by design** |
+| Non-`http(s)` scheme | **blocked** | none |
+| Host that does not resolve | **blocked** (fails closed) | none |
+
+Cloud metadata has no override on purpose. Every other block has a legitimate
+use — testing a staging box on a private VLAN is ordinary work — but reading the
+instance metadata service is not a web-application test under any configuration,
+and what it returns is credential material. An override there would be a
+one-flag path from "operator pasted a URL" to "instance role keys in a report".
+
+Two consequences worth knowing:
+
+* **DNS rebinding is caught.** A public name answering with `127.0.0.1` is
+  blocked on the address. A name answering with *both* a public and a private
+  address is also blocked: which one the browser connects to is not ours to
+  predict.
+* **The API can never widen the policy.** `POST /run` accepts
+  `allow_private_target`, but it is intersected with the server's own setting.
+  A client that can reach the service cannot turn it into an SSRF proxy.
+
+An operator allowlist (`TARGET_ALLOWLIST=*.staging.example.com,10.0.0.0/8`)
+narrows what is reachable. It never relaxes the address rules — an allowlisted
+name that resolves to a private address still needs the private-target override.
+
+TLS certificate errors are **fatal by default** (`ALLOW_INSECURE_TLS=false`). A
+broken chain on a test target may be an interception, and the agent is about to
+type a password into whatever answered.
+
+Every block and every override is logged at `WARNING` with the reason code, and
+lands in the report under `safety.blocked_navigations`.
+
+### 2. Safe mode — `safe_actions.py`
+
+On by default. Payment, checkout, delete, account cancellation, password reset,
+outbound email and other irreversible submissions are blocked during **both**
+discovery and execution. Applying the same bar to both is what stops the crawl
+from placing an order that the generated test then places a second time.
+
+A blocked step is **compiled into an explicit `raise`, never dropped**:
+
+```python
+# step 2: click Place Order
+raise AssertionError("BLOCKED BY SAFE MODE: safe mode blocked a checkout action
+('Place Order') because it would place a real order. Authorise it with
+AUTHORIZED_DESTRUCTIVE_ACTIONS=checkout ...")
+```
+
+A test that quietly omitted its checkout step and then reported success would
+claim coverage of a flow nobody exercised — strictly worse than having no test.
+
+To get checkout coverage on a throwaway environment, authorise the one category
+rather than disabling the mechanism:
+
+```bash
+python cli.py https://staging.example.com --authorize checkout,payment
+# or, to permit everything (rarely what you want):
+python cli.py https://staging.example.com --unsafe
+```
+
+Assertions are never destructive — a step asserting "the Delete button is
+visible" observes, it does not delete — so testing that a destructive control
+*renders* still works with safe mode on.
+
+Values the agent types into forms carry a run-scoped marker (`atoa<runid>`), so
+records it does create are traceable to the run that made them and
+distinguishable from real user traffic.
+
+### 3. Operational limits — `ops.py`
+
+| Control | Default | Why |
+|---|---|---|
+| `PER_TARGET_CONCURRENCY` | 1 | Two runs against one host is a load test, not a test run. |
+| `TARGET_RATE_LIMIT_PER_S` | 4.0 | Spacing floor, not a token bucket — a burst is what a target's own limiter reacts to. |
+| `MAX_CONTEXTS_PER_RUN` | 4 | Each context is a browser profile with its own memory. |
+| `RUN_TIME_BUDGET_S` | 1800 | Checked at stage boundaries, so a stage is never killed mid-artifact. |
+
+**Parallel execution stays off unless host-level rate limiting is in force**,
+whatever `ENABLE_PARALLEL_EXECUTION` says. Running flows concurrently against an
+unthrottled target turns a test run into a denial-of-service attempt on somebody
+else's staging box, and the flag alone is not sufficient authority.
+
+### What it costs, and where
+
+`SAFE_MODE=true` means the agent cannot verify that checkout *completes* — it
+verifies everything up to the irreversible click and then stops, and says so.
+That is the honest trade: an agent that placed real orders to prove it could
+would be reported as a defect on its first run against a production-like
+environment.
+
 ## Rate limits and model routing
 
 Groq's free tier is generous but finite, so work is split by *kind*, not by
@@ -594,6 +717,9 @@ it. That is the whole point.
 ```
 config.py                   Flags, thresholds, model routing, replan cap = 2, confidence = 0.6
 security.py                 SecretBox, redact_secrets, sanitize_url, credential-literal scanner
+target_policy.py            Target admission: scheme, DNS/IP class, metadata, allowlist, override
+safe_actions.py             Safe mode: destructive-action classifier, gate, test-data markers
+ops.py                      Per-target queue, rate limiting, budgets, context pool, spans
 logging_setup.py            Structured logging with a mandatory redaction filter
 cli.py                      Run the pipeline without the API or the UI
 
@@ -612,21 +738,22 @@ llm/
   client.py                 Provider-agnostic, role-routed, retrying, rate-limit aware
   prompts.py                Every prompt + all three rubrics as constants
   json_utils.py             Defensive parse, repair, one retry
+  cache.py                  URL+DOM-fingerprint response cache, per-stage cost/latency metrics
   offline_stub.py           Deterministic stub for keyless smoke runs
 
 browser/
-  session.py                Playwright lifecycle, storage_state propagation
+  session.py                Playwright lifecycle, navigation guard, third-party blocking
   login.py                  Credential-safe form login and bearer tokens
-  crawler.py                BFS crawl, boundaries, e-commerce detection
-  selectors.py              Candidate generation, live probing, ranking, round-trip parsing
+  crawler.py                Adaptive crawl, canonicalisation, SPA expansion, page fingerprint
+  selectors.py              Candidate generation, live probing, ranking, fragility grading
   sandbox.py                AST audit of generated code + restricted namespace
-  runner.py                 Execution, evidence capture, parallel mode
+  runner.py                 Execution, evidence capture, bounded flake re-run, parallel mode
   screenshots.py            Masked capture, redacted DOM snapshots
 
 differentiation/
   risk_ranking.py           LLM + deterministic rubric, guaranteed back-fill
   confidence_scorer.py      Signal scoring, blending, the 0.60 branch
-  visual_diff.py            Pillow pixel diff, cross-run baselines, diff images
+  visual_diff.py            Pillow pixel diff, environment-keyed baselines, diff images
   bug_packager.py           repro.py + screenshot.png + ticket.md + bug.json per defect
   prd_gap.py                ChromaDB or keyword overlap, method recorded
   regression_radar.py       Per-target history, "N flows changed since last time"

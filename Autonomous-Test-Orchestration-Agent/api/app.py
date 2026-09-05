@@ -43,7 +43,9 @@ from api.store import STORE, live_context, snapshot_for_status
 from config import ensure_dirs, get_settings, run_dir
 from graph.state import new_run_id, utcnow_iso
 from logging_setup import configure_logging, get_logger
+from safe_actions import SafetyPolicy, parse_categories
 from security import SECRET_BOX, Credentials, redact_secrets, redact_text, sanitize_url
+from target_policy import TargetPolicy, evaluate_target, log_decision
 
 log = get_logger("aivor.api")
 
@@ -139,6 +141,52 @@ async def start_run(request: RunRequest) -> RunAccepted:
                 "LLM_OFFLINE_MODE=true to smoke-test the plumbing without a model."
             ),
         )
+    # Full target admission, including name resolution. The request validator
+    # already applied the syntactic half; this is the part that needs DNS, run
+    # off the event loop so a slow resolver cannot stall the whole service.
+    #
+    # A client may ask for the private-target override but can never grant it:
+    # the request is intersected with the server's own policy, so an exposed
+    # instance cannot be turned into an SSRF proxy by anyone who can POST to it.
+    server_allows_private = settings.allow_private_targets
+    policy = TargetPolicy(
+        allow_private=server_allows_private and request.allow_private_target,
+        allow_insecure_tls=settings.allow_insecure_tls,
+        allowlist=tuple(settings.target_allowlist),
+        resolve_dns=settings.target_resolve_dns,
+    )
+    decision = await asyncio.to_thread(evaluate_target, request.url, policy)
+    log_decision(decision, context="POST /run")
+    if not decision.allowed:
+        if (
+            decision.category in ("loopback", "private", "link-local")
+            and server_allows_private
+            and not request.allow_private_target
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{decision.detail} This service permits private targets, but the "
+                    'request did not ask for one: resend with "allow_private_target": true.'
+                ),
+            )
+        raise HTTPException(status_code=400, detail=decision.detail)
+
+    # Destructive-action authorisation is intersected the same way.
+    requested = parse_categories(request.authorize_destructive)
+    server_authorized = SafetyPolicy.from_settings(settings).authorized
+    granted = requested & server_authorized
+    refused = sorted(c.value for c in (requested - server_authorized))
+    if refused:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"this service does not authorise the destructive categor(y/ies) {refused}. "
+                "Add them to AUTHORIZED_DESTRUCTIVE_ACTIONS on the server, and only against "
+                "a throwaway environment."
+            ),
+        )
+
     if STORE.active_count() >= settings.max_concurrent_runs:
         raise HTTPException(
             status_code=429,

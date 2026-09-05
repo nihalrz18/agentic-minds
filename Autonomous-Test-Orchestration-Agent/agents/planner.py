@@ -25,7 +25,7 @@ from typing import Any, Sequence
 
 from browser.crawler import crawl, summarise_for_prompt
 from browser.login import LoginResult, apply_token_header, perform_login, save_storage_state
-from browser.session import BrowserSession
+from browser.session import BrowserSession, install_navigation_guard
 from config import Settings, get_settings
 from differentiation.pattern_library import hints_for_prompt
 from graph.runtime import RunContext
@@ -91,6 +91,13 @@ async def explore_target(
     login_result: LoginResult | None = None
 
     context = await session.new_context(use_storage_state=False)
+    # Re-apply the target policy inside the browser. The pre-flight check
+    # approved the URL the operator supplied; this catches every later hop -
+    # a redirect off the target, a crawled link, a name that resolves
+    # differently on a second lookup - before a request leaves the machine.
+    guard = await install_navigation_guard(
+        context, settings=cfg, context_label="discovery"
+    )
     page = await context.new_page()
 
     try:
@@ -174,6 +181,18 @@ async def explore_target(
         if login_result is not None and login_result.ok and not site_map.login_url:
             site_map.login_url = login_result.login_url
             site_map.login_detected = True
+        # Surface every navigation the policy refused, so a crawl that was
+        # quietly narrowed by the guard is visible in the report rather than
+        # looking like a target with fewer pages than it has.
+        site_map.blocked_targets = list(guard.blocked)
+        for blocked in guard.blocked[:5]:
+            ctx.emit(
+                "planner",
+                "decision",
+                f"Navigation blocked by the target policy: {blocked.get('reason')}",
+                detail=str(blocked.get("detail"))[:300],
+                needs_human_review=True,
+            )
         return site_map, login_result
     finally:
         try:

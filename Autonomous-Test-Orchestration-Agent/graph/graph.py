@@ -412,8 +412,15 @@ async def generator_node(state: OrchestrationState) -> dict[str, Any]:
 @node("runner")
 async def runner_node(state: OrchestrationState) -> dict[str, Any]:
     """Execute the suite, or re-run just the tests the Healer patched."""
-    from browser.runner import merge_results, rerun_single, run_suite
-    from differentiation.risk_ranking import risk_order
+    from browser.runner import (
+        classify_rerun,
+        merge_results,
+        rerun_for_flake,
+        rerun_single,
+        run_suite,
+        should_rerun_for_flake,
+    )
+    from differentiation.risk_ranking import risk_map, risk_order
 
     ctx = get_context(state["run_id"])
     cfg = get_settings()
@@ -483,6 +490,51 @@ async def runner_node(state: OrchestrationState) -> dict[str, Any]:
         progress=progress,
         order=risk_order(state.get("risk_classifications") or []),
     )
+
+    # Bounded flake confirmation. A failure that looks timing-dependent, or one
+    # on a high-risk flow, is re-run exactly once with jitter before it is
+    # believed. A flow that then passes is reported FLAKY, not green: an
+    # intermittent failure is one a user will eventually meet.
+    risks = risk_map(state.get("risk_classifications") or [])
+    by_flow = {test.flow_id: test for test in tests}
+    flows_by_id = {flow.id: flow for flow in plan.flows}
+    confirmed: list[Any] = []
+    for result in results:
+        risk = risks.get(result.flow_id, RiskLevel.MEDIUM)
+        should, why = should_rerun_for_flake(result, risk, cfg)
+        flow = flows_by_id.get(result.flow_id)
+        test = by_flow.get(result.flow_id)
+        if not should or flow is None or test is None:
+            confirmed.append(result)
+            continue
+        ctx.emit(
+            "runner",
+            "decision",
+            f"{result.flow_id}: re-running once to confirm the failure",
+            detail=why,
+            flow_id=result.flow_id,
+        )
+        second = await rerun_for_flake(
+            session,
+            run_id=ctx.run_id,
+            flow=flow,
+            test=test,
+            screenshot_dir=screenshots,
+            settings=cfg,
+            progress=progress,
+        )
+        final, verdict = classify_rerun(result, second)
+        ctx.emit(
+            "runner",
+            "decision",
+            f"{result.flow_id}: {verdict}",
+            detail="; ".join(final.notes)[:300],
+            flow_id=result.flow_id,
+            needs_human_review=final.flaky,
+        )
+        confirmed.append(final)
+    results = confirmed
+
     _record_run_progress(ctx, results)
     return {"run_results": results}
 

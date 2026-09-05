@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from security import Credentials, insecure_for_credentials
+from target_policy import TargetPolicy, evaluate_target
 
 # --------------------------------------------------------------------------
 # Request models
@@ -132,6 +133,24 @@ class RunRequest(BaseModel):
         description="Optional requirements text used by the PRD gap analysis.",
     )
     credentials: CredentialsIn | None = Field(default=None, repr=False)
+    allow_private_target: bool = Field(
+        default=False,
+        description=(
+            "Request that a loopback/private/link-local target be permitted. Only "
+            "honoured when the service is itself configured with "
+            "ALLOW_PRIVATE_TARGETS=true; a client can never widen the server policy."
+        ),
+    )
+    authorize_destructive: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Destructive action categories to authorise for this run (payment, "
+            "checkout, delete, account_cancellation, password_reset, email_send, "
+            "irreversible_submit). Only honoured for categories the service already "
+            "authorises via AUTHORIZED_DESTRUCTIVE_ACTIONS."
+        ),
+    )
 
     @field_validator("url", mode="before")
     @classmethod
@@ -143,9 +162,12 @@ class RunRequest(BaseModel):
         ``https://user:pass@host``) and validation errors are rendered before
         the value has been registered with the redactor.
 
-        Private and loopback hosts are intentionally *allowed*. This agent
-        exists to test applications, and pointing it at ``http://localhost:3000``
-        is the primary local workflow; the operator chooses the target.
+        This validator performs the *syntactic* half of the target admission
+        policy - scheme, host, metadata hostnames and IP-literal address class -
+        so that an obviously inadmissible URL is a fast 422. The half that needs
+        name resolution runs in the request handler, which can await it without
+        blocking the event loop, and again on every redirect hop in
+        :mod:`browser.session`. See :mod:`target_policy`.
         """
         if not isinstance(value, str):
             raise ValueError("url must be a string beginning with http:// or https://")
@@ -160,7 +182,27 @@ class RunRequest(BaseModel):
             raise ValueError("url must use the http or https scheme")
         if not parts.netloc:
             raise ValueError("url must include a host, for example https://example.com")
+
+        # Syntactic policy pass: no DNS, so an IP literal or a known metadata
+        # hostname is rejected here while a name is deferred to the handler.
+        # ``allow_private`` is deliberately True at this stage: whether a private
+        # target is permitted is a server-configuration question the handler
+        # answers, and deciding it here would reject localhost before the
+        # operator's own override could be consulted.
+        decision = evaluate_target(
+            cleaned, TargetPolicy(allow_private=True, resolve_dns=False)
+        )
+        if not decision.allowed:
+            raise ValueError(decision.detail)
         return cleaned
+
+    @field_validator("authorize_destructive", mode="before")
+    @classmethod
+    def _normalize_categories(cls, value: Any) -> Any:
+        """Accept a comma-separated string as well as a list."""
+        if isinstance(value, str):
+            return [chunk.strip() for chunk in value.replace(";", ",").split(",") if chunk.strip()]
+        return value
 
     @field_validator("intent", "prd_text", mode="before")
     @classmethod

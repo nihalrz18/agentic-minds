@@ -192,10 +192,30 @@ class DiscoveredPage(BaseModel):
     is_protected: bool = False
     forms: list[dict[str, Any]] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
-    buttons: list[str] = Field(default_factory=list)
+    buttons: list[dict[str, Any]] = Field(default_factory=list)
+    """Button inventory entries (``text``, ``aria_label``, ``test_id``...).
+
+    Annotated as dictionaries because that is what the crawler stores and what
+    every consumer reads. The previous ``list[str]`` annotation was never true
+    at runtime - assignment bypasses pydantic validation, so the mismatch was
+    silent - and it misled anyone reading the model."""
     inputs: list[dict[str, Any]] = Field(default_factory=list)
     headings: list[str] = Field(default_factory=list)
     text_excerpt: str = ""
+    link_texts: dict[str, str] = Field(default_factory=dict)
+    """Anchor text keyed by href. The adaptive crawler scores a candidate on
+    what the link *says* as well as where it points, which is the only signal
+    available in a single-page application with opaque routes."""
+    skipped_controls: list[str] = Field(default_factory=list)
+    """Controls discovery deliberately did not click, with the reason. Recorded
+    so a reader can tell "not exercised" from "exercised and passed"."""
+    dom_fingerprint: str = ""
+    """Stable hash of the page's interactive structure. Keys the selector and
+    discovery caches, and detects that a page changed under a rerun."""
+
+    def link_text_for(self, href: str) -> str:
+        """Anchor text for ``href``, or an empty string when it was not captured."""
+        return self.link_texts.get(href, "")
 
 
 class SiteMap(BaseModel):
@@ -208,6 +228,16 @@ class SiteMap(BaseModel):
     ecommerce_signals: list[str] = Field(default_factory=list)
     auth_blocked: bool = False
     notes: list[str] = Field(default_factory=list)
+    surfaces: dict[str, str] = Field(default_factory=dict)
+    """Surface label (``authentication``, ``checkout``, ``search``...) keyed by
+    canonical URL, recorded by the adaptive crawler. The Planner uses it to bias
+    flows towards the surfaces that actually carry business risk."""
+    blocked_targets: list[dict[str, Any]] = Field(default_factory=list)
+    """Audit trail of navigations the target policy refused during discovery."""
+
+    def surface_labels(self) -> list[str]:
+        """Distinct high-value surfaces the crawl actually reached."""
+        return sorted({label for label in self.surfaces.values() if label != "general"})
 
     def area_names(self) -> list[str]:
         """Coarse functional areas, used by the coverage rubric."""
@@ -322,6 +352,17 @@ class GeneratedTest(BaseModel):
     valid: bool = True
     validation_error: str | None = None
     repair_attempts: int = 0
+    blocked_actions: list[dict[str, Any]] = Field(default_factory=list)
+    """Steps safe mode refused to compile into executable calls, with the
+    category and reason. Present so the report can distinguish a flow that
+    passed from one that was reduced before it ever ran."""
+    selector_fragility: list[dict[str, Any]] = Field(default_factory=list)
+    """Per-step selector stability assessment: the strategy that won, and why
+    it is or is not durable. Drives the "this test will break next sprint"
+    warning in the report."""
+    page_fingerprint: str = ""
+    """DOM fingerprint captured at validation time, so a later failure can be
+    attributed to a changed page rather than to a bad locator."""
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +384,14 @@ class TestResult(BaseModel):
     final_url: str | None = None
     console_errors: list[str] = Field(default_factory=list)
     started_at: str = Field(default_factory=utcnow_iso)
+    flaky: bool = False
+    """Set when a flow failed and then passed on its confirmation re-run. A
+    flaky flow is reported as unstable in its own right, never as a pass: an
+    intermittent failure is something a user will eventually meet."""
+    rerun_of_failure: bool = False
+    """True on the result produced by the bounded flake-confirmation re-run."""
+    notes: list[str] = Field(default_factory=list)
+    """Execution commentary - why a re-run happened and what it concluded."""
 
     @property
     def failed(self) -> bool:
@@ -504,6 +553,16 @@ class FinalReport(BaseModel):
     """Per-agent memory contribution: carried-forward flows, selectors served
     from memory, recurring/resolved defects and cumulative coverage. Empty
     when agent memory is disabled or this is the first run for the target."""
+    llm_cost: dict[str, Any] = Field(default_factory=dict)
+    """Per-stage token usage, estimated cost, latency, retries and cache hits.
+    Makes an LLM-spend regression attributable to a stage rather than guessed
+    at, and makes the saving from deterministic compilation visible."""
+    timings: dict[str, Any] = Field(default_factory=dict)
+    """Span roll-up per stage plus the slowest individual operations."""
+    safety: dict[str, Any] = Field(default_factory=dict)
+    """The target and destructive-action policy the run actually executed
+    under, plus every navigation and action it refused. A report that does not
+    say what was blocked is claiming coverage it does not have."""
 
 
 # --------------------------------------------------------------------------
