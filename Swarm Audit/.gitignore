@@ -1,0 +1,44 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node / Next.js ────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.vercel
+.netlify
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────
+.idea/
+.vscode/
+
+# ── Runtime / temp ────────────────────────────────────────────────
+/tmp/
+*.log
+*.pdf

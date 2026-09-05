@@ -1,0 +1,134 @@
+name: PR Guardian — SwarmAudit Security Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write    # post PR comments
+  checks: write           # create Check Runs
+  contents: read          # check out code
+
+jobs:
+  swarmaudit-pr-scan:
+    name: SwarmAudit PR Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Gather changed files ────────────────────────────────────────────────
+      - name: Get changed files
+        id: changed_files
+        uses: tj-actions/changed-files@v44
+        with:
+          json: true
+          write_output_files: false
+
+      # ── Start SwarmAudit PR scan ────────────────────────────────────────────
+      - name: Start SwarmAudit PR scan
+        id: start_scan
+        env:
+          SWARMAUDIT_INTERNAL_API_KEY: ${{ secrets.SWARMAUDIT_INTERNAL_API_KEY }}
+          BACKEND_URL: ${{ vars.SWARMAUDIT_BACKEND_URL || 'https://swarm-audit.onrender.com' }}
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          CHANGED='${{ steps.changed_files.outputs.all_changed_files }}'
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${BACKEND_URL}/api/audit/start-pr-scan" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${SWARMAUDIT_INTERNAL_API_KEY}" \
+            -d "{
+              \"github_url\": \"${REPO_URL}\",
+              \"repo_full_name\": \"${{ github.repository }}\",
+              \"pr_number\": ${{ github.event.pull_request.number }},
+              \"sha\": \"${{ github.event.pull_request.head.sha }}\",
+              \"changed_files\": ${CHANGED}
+            }")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP: $HTTP_CODE"
+          echo "Body: $BODY"
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::warning::SwarmAudit scan start returned HTTP $HTTP_CODE — scan skipped."
+            echo "session_id=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SESSION_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))")
+          echo "session_id=$SESSION_ID" >> $GITHUB_OUTPUT
+          echo "SwarmAudit session: $SESSION_ID"
+
+      # ── Connect via WebSocket and wait for completion ───────────────────────
+      # The backend handles all phases including GitHub Guardian (PR comment + Check Run).
+      # This step just streams the WS until the audit is done.
+      - name: Wait for audit to complete
+        if: steps.start_scan.outputs.session_id != ''
+        env:
+          SESSION_ID: ${{ steps.start_scan.outputs.session_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BACKEND_URL: ${{ vars.SWARMAUDIT_BACKEND_URL || 'https://swarm-audit.onrender.com' }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pip install websockets --quiet
+
+          python3 - <<'PYEOF'
+          import asyncio, json, os, sys, websockets
+
+          session_id = os.environ["SESSION_ID"]
+          backend    = os.environ["BACKEND_URL"].replace("https://", "wss://").replace("http://", "ws://")
+          github_url = f"https://github.com/{os.environ['REPO']}"
+          gh_token   = os.environ["GITHUB_TOKEN"]
+          pr_number  = int(os.environ["PR_NUMBER"])
+          sha        = os.environ["SHA"]
+          repo       = os.environ["REPO"]
+
+          uri = f"{backend}/ws/pr-audit/{session_id}"
+          print(f"Connecting to {uri}", flush=True)
+
+          async def run():
+              async with websockets.connect(uri, ping_interval=30, open_timeout=30) as ws:
+                  await ws.send(json.dumps({
+                      "github_url":    github_url,
+                      "pr_number":     pr_number,
+                      "sha":           sha,
+                      "repo_full_name": repo,
+                      "changed_files": [],
+                      "github_token":  gh_token,
+                  }))
+                  async for raw in ws:
+                      msg = json.loads(raw)
+                      agent  = msg.get("agent_name", "")
+                      status = msg.get("status", "")
+                      text   = msg.get("message", "")
+                      print(f"[{agent}] {status}: {text}", flush=True)
+                      if agent == "Report Agent" and status == "done":
+                          print("Audit complete — PDF ready.", flush=True)
+                          break
+                      if agent == "GitHub Guardian" and status in ("done", "error"):
+                          print(f"GitHub Guardian: {text}", flush=True)
+                          break
+
+          asyncio.run(run())
+          PYEOF
+
+      - name: Scan summary
+        if: always()
+        run: |
+          SESSION_ID="${{ steps.start_scan.outputs.session_id }}"
+          if [ -z "$SESSION_ID" ]; then
+            echo "No session created — scan was skipped or backend unavailable."
+          else
+            echo "SwarmAudit session: $SESSION_ID"
+            echo "Report: https://swarm-audit.vercel.app/audit/$SESSION_ID"
+          fi
