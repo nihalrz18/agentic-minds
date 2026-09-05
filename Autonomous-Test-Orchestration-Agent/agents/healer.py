@@ -19,7 +19,7 @@ How the decision is made
    two are blended, which caps how far a persuasive-sounding rationale can move
    the outcome away from the evidence.
 
-3. **A real branch at 0.6.** At or above the threshold, a SCRIPT_ISSUE gets its
+3. **A real branch at 0.7.** At or above the threshold, a SCRIPT_ISSUE gets its
    locator or wait patched and the test is re-run once. Below it, nothing is
    applied: the finding is queued for human review with its evidence, and both
    the UI and the report show it as such.
@@ -259,7 +259,7 @@ async def heal_failure(
                 },
             ],
             task=f"healer:{flow.id}",
-            max_tokens=2500,
+            max_tokens=900,
         ) or {}
     except (JSONParseError, Exception) as exc:  # noqa: B014 - deliberate broad catch
         log.warning("healer classification failed for %s: %s", flow.id, exc)

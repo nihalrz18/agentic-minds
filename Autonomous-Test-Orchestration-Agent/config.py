@@ -58,12 +58,13 @@ After this many failed gates the orchestrator force-proceeds and records
 ``force_proceeded=True`` plus an explicit limitation in the final report.
 """
 
-CONFIDENCE_AUTO_APPLY_THRESHOLD: Final[float] = 0.6
+CONFIDENCE_AUTO_APPLY_THRESHOLD: Final[float] = 0.7
 """Healer confidence at or above which a script fix may be auto-applied.
 
 Strictly below this value the patch is *not* applied; the finding is queued
 for human review with its evidence. This is a different code branch, not a
-different log level.
+different log level. Hard rule: under 0.7, classify as inconclusive and
+escalate rather than guess.
 """
 
 HEAL_RERUN_CAP: Final[int] = 1

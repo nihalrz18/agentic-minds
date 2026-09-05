@@ -22,12 +22,14 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import ssl
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, Sequence, Type, TypeVar
 
 import httpx
+import truststore
 from pydantic import BaseModel
 
 from config import Settings, get_settings
@@ -156,9 +158,13 @@ class OpenAICompatibleProvider:
         if self._client is None:
             async with self._client_lock:
                 if self._client is None:
+                    # Verify via the OS trust store (not just certifi) so this
+                    # works behind corporate TLS-inspecting proxies too.
+                    ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                     self._client = httpx.AsyncClient(
                         base_url=self.base_url,
                         timeout=httpx.Timeout(self.settings.llm_timeout_s),
+                        verify=ssl_context,
                         headers={
                             "Authorization": f"Bearer {self._api_key}",
                             "Content-Type": "application/json",

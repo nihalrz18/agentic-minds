@@ -247,7 +247,7 @@ async def generate_plan(
         ModelRole.REASONING,
         messages,
         task=f"planner:rev{revision}",
-        max_tokens=6000,
+        max_tokens=1800,
     )
     return build_plan_from_payload(payload, site_map=site_map, revision=revision, settings=cfg)
 

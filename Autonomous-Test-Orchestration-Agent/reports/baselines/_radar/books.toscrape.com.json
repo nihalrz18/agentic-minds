@@ -1,7 +1,7 @@
 {
   "version": 1,
   "target": "https://books.toscrape.com/",
-  "updated_at": "2026-09-05T07:43:03.007597+00:00",
+  "updated_at": "2026-09-05T10:45:40.333487+00:00",
   "runs": [
     {
       "run_id": "run_13354f22ecd4",
@@ -284,6 +284,269 @@
           "healed": 0,
           "not_run": 0,
           "high_risk": 0,
+          "medium_risk": 2,
+          "low_risk": 1
+        }
+      }
+    },
+    {
+      "run_id": "run_eeab5e926e49",
+      "ts": "2026-09-05T08:51:15.483566+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_92203e235bfb",
+      "ts": "2026-09-05T08:54:45.472862+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_ab62f361546d",
+      "ts": "2026-09-05T09:03:37.597076+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Load home page and verify category navigation",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "passed"
+          },
+          "F002": {
+            "name": "Browse Travel category and see product list",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Open a book detail page and verify information",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F004": {
+            "name": "Add a book to the basket and verify basket contents",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Add the same book twice and verify quantity increments",
+            "category": "edge_case",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F006": {
+            "name": "Navigate to a non‑existent page and see 404 message",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F007": {
+            "name": "Visit a category page beyond available pagination and verify empty results",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 7,
+          "passed": 2,
+          "failed": 5,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 2,
+          "medium_risk": 4,
+          "low_risk": 1
+        }
+      }
+    },
+    {
+      "run_id": "run_fa133da407e8",
+      "ts": "2026-09-05T10:04:49.717000+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_de30e7151181",
+      "ts": "2026-09-05T10:04:55.099678+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_358ac79af9fb",
+      "ts": "2026-09-05T10:28:26.513972+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Browse the main catalogue",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F002": {
+            "name": "Search for a specific book",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Add a book to the basket",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F004": {
+            "name": "Submit an empty search query",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F005": {
+            "name": "Proceed from basket to checkout",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F006": {
+            "name": "Search for a non-existent book",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F007": {
+            "name": "View a book detail page",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Filter books by category",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "passed"
+          }
+        },
+        "counts": {
+          "flows": 8,
+          "passed": 4,
+          "failed": 4,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 4,
+          "medium_risk": 4,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_64fcd9862723",
+      "ts": "2026-09-05T10:45:40.333481+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Browse Home and navigate to a specific category",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "View product details and add to basket",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F003": {
+            "name": "View basket contents",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F004": {
+            "name": "Filter products by price range (edge case: empty result)",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "healed"
+          },
+          "F005": {
+            "name": "Navigate to a non-existent category (error state)",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "passed"
+          }
+        },
+        "counts": {
+          "flows": 5,
+          "passed": 2,
+          "failed": 2,
+          "error": 0,
+          "skipped": 0,
+          "healed": 1,
+          "not_run": 0,
+          "high_risk": 2,
           "medium_risk": 2,
           "low_risk": 1
         }

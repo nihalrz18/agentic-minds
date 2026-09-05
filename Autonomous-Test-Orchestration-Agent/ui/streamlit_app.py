@@ -27,7 +27,7 @@ import requests
 import streamlit as st
 
 try:
-    from config import get_settings
+    from config import CONFIDENCE_AUTO_APPLY_THRESHOLD, get_settings
 
     _DEFAULTS = get_settings()
     DEFAULT_API = _DEFAULTS.api_base_url
@@ -35,6 +35,22 @@ try:
 except Exception:  # pragma: no cover - the UI must start even without config
     DEFAULT_API = "http://127.0.0.1:8000"
     DEFAULT_TARGET = "https://books.toscrape.com/"
+    CONFIDENCE_AUTO_APPLY_THRESHOLD = 0.7
+
+# Plain-language labels for the codes the agent reports internally. The
+# report/events keep the machine-readable codes; the UI never shows them raw.
+CLASS_LABEL = {
+    "SCRIPT_ISSUE": "Test script issue (not an app bug)",
+    "GENUINE_DEFECT": "Confirmed application defect",
+    "ENVIRONMENT": "Environment blocker (captcha / network / login wall)",
+    "UNKNOWN": "Unclear — needs a human look",
+}
+ACTION_LABEL = {
+    "apply_patch_and_rerun": "Auto-fixed the test and re-ran it",
+    "route_to_bug_packager": "Filed as a bug",
+    "quarantine_environment": "Paused for a human — looks like an environment issue",
+    "queue_for_review": "Sent to human review",
+}
 
 POLL_SECONDS = 1.5
 REQUEST_TIMEOUT = 20
@@ -126,6 +142,16 @@ def api_post(base: str, path: str, payload: dict[str, Any]) -> tuple[bool, Any]:
         return True, response.json()
     except ValueError:
         return False, "the API returned a non-JSON response"
+
+
+def _plain_error(message: str | None, limit: int = 180) -> str:
+    """First line of a Playwright error, trimmed of its verbose call log."""
+    if not message:
+        return ""
+    first_line = message.strip().split("\n", 1)[0].strip()
+    if len(first_line) > limit:
+        first_line = first_line[: limit - 1].rstrip() + "…"
+    return first_line
 
 
 def _error_text(response: requests.Response) -> str:
@@ -434,9 +460,11 @@ def render_results(base: str, run_id: str) -> None:
     st.divider()
     st.header("Report")
 
+    _render_verdict_banner(report)
+
     summary = report.get("executive_summary") or ""
     if summary:
-        st.markdown(f"#### Executive summary\n{summary}")
+        st.markdown(f"#### What happened\n{summary}")
     impact = report.get("business_impact") or ""
     if impact:
         st.success(f"**Business impact.** {impact}")
@@ -450,6 +478,45 @@ def render_results(base: str, run_id: str) -> None:
     _render_prd_and_radar(report)
     _render_limitations(report)
     _render_downloads(base, run_id)
+
+
+def _render_verdict_banner(report: dict[str, Any]) -> None:
+    """One glance, no jargon: did this run find something you need to act on?"""
+    totals = report.get("totals") or {}
+    passed = int(totals.get("passed", 0) or 0)
+    failed = int(totals.get("failed", 0) or 0)
+    total_flows = int(totals.get("tests_executed", passed + failed) or (passed + failed))
+    high_risk_failures = int(totals.get("high_risk_failures", 0) or 0)
+    needs_review = int(totals.get("needs_human_review", 0) or 0)
+    bugs = int(totals.get("bugs_filed", 0) or 0)
+    healed = int(totals.get("healed", 0) or 0)
+
+    if total_flows == 0:
+        st.info("No tests were executed in this run.")
+        return
+
+    pass_rate = passed / total_flows
+    extra = (
+        f"{bugs} bug(s) filed" + (f", {needs_review} item(s) need a human look" if needs_review else "")
+        if (bugs or needs_review)
+        else "nothing needs a human look"
+    )
+
+    if high_risk_failures > 0:
+        st.error(
+            f"### 🔴 Action needed — {high_risk_failures} high-risk flow(s) failed\n"
+            f"**{passed}/{total_flows} flows passed ({pass_rate:.0%}).** {extra}."
+        )
+    elif failed > 0:
+        st.warning(
+            f"### 🟠 Mostly OK, but {failed} flow(s) failed\n"
+            f"**{passed}/{total_flows} flows passed ({pass_rate:.0%}).** {extra}."
+        )
+    else:
+        st.success(
+            f"### ✅ All clear — {passed}/{total_flows} flows passed"
+            + (f" ({healed} needed a heal along the way)" if healed else "")
+        )
 
 
 def _render_flow_table(report: dict[str, Any]) -> None:
@@ -467,7 +534,7 @@ def _render_flow_table(report: dict[str, Any]) -> None:
             "Flow": r.get("flow_name", ""),
             "Category": str(r.get("category", "")).replace("_", " "),
             "Status": f"{STATUS_ICON.get(str(r.get('status')), '')} {r.get('status', '')}",
-            "Outcome": r.get("outcome_label", ""),
+            "What happened": _plain_error(r.get("error_message")) or r.get("outcome_label", ""),
             "Duration": f"{float(r.get('duration_s', 0) or 0):.1f}s",
             "Bugs": ", ".join(r.get("bug_ids") or []),
         }
@@ -512,15 +579,18 @@ def _render_review_queue(report: dict[str, Any]) -> None:
         st.caption("Nothing was left for a human: every finding was confidently classified.")
         return
     st.caption(
-        "These failures scored **below the 0.60 confidence threshold**, so no patch was "
-        "applied. They are queued with their evidence rather than silently changed."
+        "These findings were **not auto-fixed**. Either the agent's confidence was below "
+        f"the {CONFIDENCE_AUTO_APPLY_THRESHOLD:.0%} auto-apply bar, or the failure looks like "
+        "an environment problem (captcha, network, login wall) that no code patch can solve. "
+        "Each is queued here with its evidence instead of being silently changed."
     )
     for action in queue:
         with st.container(border=True):
             cols = st.columns([3, 1, 1])
             cols[0].markdown(f"**{action.get('flow_name') or action.get('flow_id')}**")
             cols[1].metric("Confidence", f"{float(action.get('confidence', 0)):.2f}")
-            cols[2].markdown(f"`{action.get('classification', '')}`")
+            classification = str(action.get("classification", ""))
+            cols[2].markdown(f"**{CLASS_LABEL.get(classification, classification)}**")
             st.write(action.get("rationale", ""))
             if action.get("patch_summary"):
                 st.caption(action["patch_summary"])
@@ -538,11 +608,11 @@ def _render_healer_table(report: dict[str, Any]) -> None:
             [
                 {
                     "Flow": a.get("flow_name") or a.get("flow_id"),
-                    "Classification": a.get("classification"),
+                    "Classification": CLASS_LABEL.get(str(a.get("classification")), a.get("classification")),
                     "Confidence": round(float(a.get("confidence", 0) or 0), 2),
                     "Auto-applied": "✅" if a.get("auto_applied") else "—",
                     "Re-run": a.get("rerun_status") or "—",
-                    "Action": a.get("action"),
+                    "What the agent did": ACTION_LABEL.get(str(a.get("action")), a.get("action")),
                 }
                 for a in actions
             ],
@@ -661,7 +731,23 @@ def _render_prd_and_radar(report: dict[str, Any]) -> None:
     radar = report.get("regression_radar") or {}
     if radar and radar.get("enabled") is not False and not radar.get("first_run"):
         with st.expander(f"Regression radar — {radar.get('summary', '')}"):
-            st.json(radar)
+            st.caption(
+                f"Compared with run `{radar.get('compared_with') or '—'}` "
+                f"({radar.get('history_runs', 0)} run(s) of history for this target)."
+            )
+            cols = st.columns(4)
+            cols[0].metric("Newly failing", len(radar.get("newly_failing") or []))
+            cols[1].metric("Newly passing", len(radar.get("newly_passing") or []))
+            cols[2].metric("Flows added", len(radar.get("flows_added") or []))
+            cols[3].metric("Flows removed", len(radar.get("flows_removed") or []))
+            for label, items in (
+                ("Newly failing", radar.get("newly_failing")),
+                ("Newly passing", radar.get("newly_passing")),
+                ("Flows added", radar.get("flows_added")),
+                ("Flows removed", radar.get("flows_removed")),
+            ):
+                if items:
+                    st.markdown(f"**{label}:** " + ", ".join(str(i) for i in items))
 
 
 def _render_limitations(report: dict[str, Any]) -> None:

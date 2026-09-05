@@ -82,8 +82,9 @@ Start from 0.5, then adjust:
                  was flaky or returned 5xx; the expected text is ambiguous or
                  templated; the failure happened behind a login wall.
 Report a numeric value in [0,1] and a one-sentence rationale.
-Anything strictly below 0.6 is NOT auto-applied; it is queued for human
-review with its evidence attached."""
+Anything strictly below 0.7 is NOT auto-applied; it is queued for human
+review with its evidence attached. This is a hard rule: never guess under
+uncertainty."""
 
 JSON_ONLY = (
     "Respond with a single valid JSON object and nothing else. "
@@ -91,8 +92,13 @@ JSON_ONLY = (
 )
 
 
-def _j(payload: Any, limit: int = 12000) -> str:
-    """Compact JSON for embedding in a prompt, truncated defensively."""
+def _j(payload: Any, limit: int = 6000) -> str:
+    """Compact JSON for embedding in a prompt, truncated defensively.
+
+    The limit is deliberately conservative: this account's Groq free tier caps
+    several models at 8000 tokens PER MINUTE total (prompt + completion), so a
+    prompt alone must leave real headroom rather than filling the budget.
+    """
     text = json.dumps(payload, ensure_ascii=False, default=str)
     if len(text) > limit:
         return text[:limit] + " ...TRUNCATED"
@@ -103,32 +109,20 @@ def _j(payload: Any, limit: int = 12000) -> str:
 # PLANNER
 # ==========================================================================
 PLANNER_SYSTEM = f"""\
-You are the Planner sub-agent of an autonomous test orchestration system.
+You are the Planner. Turn a real browser-crawl site map (pages, forms, \
+inputs, buttons, links) into a rigorous test plan of MEANINGFUL user journeys.
 
-You are given a structural map of a live web application produced by a real
-browser crawl: pages, headings, forms, inputs, buttons and links. Your job is
-to turn that map into a rigorous, executable test plan covering MEANINGFUL
-user journeys.
-
-Non-negotiable requirements for the plan:
-- Do NOT produce happy paths only. A plan that is all happy paths is a failing
-  plan.
-- Include at least one edge case (empty input, boundary value, optional field
-  omitted) and at least one error state (invalid input, failed submit, 404 or
-  empty-results state).
-- If the crawl reports a login UI, include BOTH a successful-authentication
-  flow AND an invalid-credential error flow.
-- If cart / checkout / payment surfaces were discovered, cover them.
-- Every flow must state a concrete, observable expected outcome. "User clicks
-  the button" is not an outcome; "an inline error reading 'Invalid email'
-  appears below the field and the URL is unchanged" is.
-- Steps must reference elements in plain language ("the search input", "the
-  Add to Basket button"). Do NOT invent CSS selectors: real selectors are
-  resolved later against the live DOM.
-
-Authentication: if credentials are needed, an authenticated browser session is
-already established for you and the test runtime injects secrets at execution
-time. Never write a username or password into the plan.
+Rules:
+- Never all-happy-path. Include >=1 edge case (boundary/empty/optional-field) \
+and >=1 error state (invalid input, failed submit, 404/empty result).
+- Login UI present -> include BOTH a successful-auth flow AND an \
+invalid-credential error flow.
+- Cart/checkout/payment surfaces present -> cover them.
+- Every flow states a concrete, observable expected outcome, not "clicks the \
+button" - e.g. "an inline error reading 'Invalid email' appears; URL unchanged".
+- Steps reference elements in plain language ("the search input"). Never \
+invent CSS selectors; real ones are resolved later against the live DOM.
+- Never write a literal username/password; the runtime injects secrets.
 
 Allowed step actions:
   goto, click, fill, select, check, press, wait_for,
@@ -218,23 +212,18 @@ def planner_user(
 # COVERAGE GATE
 # ==========================================================================
 COVERAGE_SYSTEM = f"""\
-You are the coverage-evaluation gate of an autonomous test orchestration
-system. You run BEFORE any test code is generated. Your job is to reject plans
-that would waste generation effort on shallow coverage.
+You are the coverage gate, run before any test code is generated. Reject \
+plans that would waste generation effort on shallow coverage.
 
-Apply this rubric literally. Mark a check satisfied ONLY if the plan clearly
-contains it; absence of evidence is not satisfaction.
-
+Apply this rubric literally - satisfied ONLY with clear evidence in the plan:
 {COVERAGE_RUBRIC_TEXT}
 
-The gate PASSES only when every applicable check is satisfied. C4 is not
-applicable when the crawl found no login UI; C5 is not applicable when no
-cart/checkout/payment surface was discovered. A check that does not apply is
-reported as satisfied with evidence "not applicable".
+Gate PASSES only when every applicable check is satisfied. C4 not applicable \
+with no login UI; C5 not applicable with no cart/checkout/payment surface - \
+mark those satisfied with evidence "not applicable".
 
-When the gate fails, the "feedback" field is sent verbatim back to the Planner.
-Make it specific and actionable: name the missing flow, the page it belongs on,
-and the outcome it should assert. Vague feedback wastes a re-plan cycle.
+On failure, "feedback" goes verbatim to the Planner: name the missing flow, \
+its page, and the outcome it should assert. Vague feedback wastes a cycle.
 
 {JSON_ONLY}
 
@@ -275,10 +264,8 @@ def coverage_user(
 # RISK RANKING
 # ==========================================================================
 RISK_SYSTEM = f"""\
-You are the risk-ranking stage of an autonomous test orchestration system.
-Classify each test flow as high, medium or low business risk so that
-generation, healing and the final report can be ordered by what actually
-matters to the business.
+Classify each test flow as high, medium or low business risk, so \
+generation/healing/the report can be ordered by what matters to the business.
 
 RUBRIC:
 {RISK_RUBRIC_TEXT}
@@ -318,42 +305,26 @@ def risk_user(flows: Sequence[dict[str, Any]]) -> str:
 # GENERATOR
 # ==========================================================================
 GENERATOR_SYSTEM = f"""\
-You are the Generator sub-agent. You convert one approved test flow into a
-single executable Playwright (Python, async API) test function.
+Convert one approved flow + its live-resolved selectors into one executable \
+Playwright (Python, async) test function.
 
-You are given, for each step, the SELECTOR RESOLUTION already performed
-against the live DOM by the orchestrator. Use the resolved locator expressions
-verbatim. Do not invent selectors; a step whose selector could not be resolved
-is marked resolved=false and you must handle it defensively (soft assertion or
-an explicit skip with a clear message).
+Use resolved locators verbatim, never invent one. resolved=false steps must \
+be handled defensively (soft assertion or explicit skip with a clear message).
+Selector priority if you must add one yourself: data-testid > role+name > \
+text > CSS. Never use CSS when a role/testid was available.
 
-Write the function EXACTLY in this shape:
-
-async def test_flow(page, ctx):
-    ...
+Shape: async def test_flow(page, ctx): ...
 
 Rules:
-- ``page`` is a Playwright ``Page`` on a context that already carries any
-  authenticated session. ``ctx`` is a dict.
-- Use ``await`` on every Playwright call.
-- Use the ``expect`` helper already imported in the module for assertions:
-  ``await expect(locator).to_be_visible()``, ``.to_have_text()``,
-  ``.to_contain_text()``, and ``await expect(page).to_have_url(...)``.
-- SECRETS: never write a literal username, password or token. When a step
-  needs one call ``ctx["secret"]("username")`` or ``ctx["secret"]("password")``.
-  For a deliberately-invalid-credentials flow, use obviously fake literals such
-  as "nobody@example.invalid" / "definitely-not-the-password".
-- Allowed imports: none. The module already imports what you need
-  (``re``, ``expect``, ``asyncio``). Do NOT emit import statements.
-- Forbidden entirely: ``os``, ``sys``, ``subprocess``, ``open``, ``eval``,
-  ``exec``, ``__import__``, ``input``, network calls other than through
-  ``page``.
-- Prefer ``await expect(...)`` assertions over bare ``assert``; they retry and
-  produce far better failure messages.
-- Set explicit timeouts on waits: ``timeout=8000``.
-- No ``page.wait_for_timeout`` longer than 2000ms; prefer web-first assertions.
-- The function must be self-contained, deterministic, and must FAIL when the
-  application misbehaves. Never soften an assertion to make it pass.
+- One-line comment above each step's code citing its index + description.
+- await every call. Use expect(...) (to_be_visible/to_have_text/\
+to_contain_text/to_have_url) over bare assert.
+- Secrets: never a literal credential; use ctx["secret"]("username"/\
+"password"). Invalid-credential flows use obviously fake literals.
+- No import statements (re, expect, asyncio already available). Forbidden: \
+os, sys, subprocess, open, eval, exec, __import__, input, non-page network.
+- Explicit timeouts (timeout=8000); no wait_for_timeout over 2000ms.
+- Never soften an assertion - the test must fail when the app misbehaves.
 
 {JSON_ONLY}
 
@@ -400,26 +371,22 @@ def generator_user(
 # HEALER
 # ==========================================================================
 HEALER_SYSTEM = f"""\
-You are the Healer sub-agent. A generated test failed. Decide whether the TEST
-is broken or the APPLICATION is broken, and say how confident you are.
+A generated test failed. Decide TEST vs APPLICATION broken, with confidence.
 
-Classification vocabulary:
-  SCRIPT_ISSUE    - the locator is stale/ambiguous, the wait was too short, or
-                    the test raced the page. The application behaved correctly.
-  GENUINE_DEFECT  - the application did the wrong thing: wrong text, missing
-                    element that should exist, server error, broken navigation,
-                    lost state.
-  ENVIRONMENT     - neither: captcha, bot wall, rate limit, network failure,
-                    the target being down, or an auth wall we cannot pass.
-  UNKNOWN         - evidence is insufficient to choose.
+Classes:
+  SCRIPT_ISSUE   - stale/ambiguous locator, short wait, or a page race. App \
+behaved correctly.
+  GENUINE_DEFECT - app did the wrong thing (wrong text, missing element, \
+server error, broken nav, lost state).
+  ENVIRONMENT    - captcha, bot wall, rate limit, network failure, target \
+down, or an unpassable auth wall.
+  UNKNOWN        - evidence is insufficient.
 
-CONFIDENCE RUBRIC:
 {CONFIDENCE_RUBRIC_TEXT}
 
-ABSOLUTE RULE: you may NEVER propose weakening or deleting an assertion to
-make a test pass. If the expected outcome is not happening, that is a
-GENUINE_DEFECT and it goes to the bug packager. Fixes are limited to locator
-substitution and wait/timing adjustments.
+ABSOLUTE RULE: never propose weakening/deleting an assertion to pass a test. \
+An unmet expected outcome is a GENUINE_DEFECT, routed to the bug packager. \
+Fixes are limited to locator substitution and wait/timing adjustments.
 
 {JSON_ONLY}
 
@@ -595,6 +562,6 @@ Schema:
 def report_synthesis_user(*, facts: dict[str, Any]) -> str:
     return (
         "Run facts (already computed, do not recompute or contradict them):\n"
-        f"{_j(facts, limit=16000)}\n\n"
+        f"{_j(facts, limit=6000)}\n\n"
         "Write the summary."
     )

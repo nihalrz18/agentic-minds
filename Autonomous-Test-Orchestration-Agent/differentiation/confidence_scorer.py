@@ -11,12 +11,12 @@ Why blend rather than trust the model
 A language model's self-reported confidence is poorly calibrated and easy to
 talk up. The deterministic half is grounded in facts, and averaging the two
 caps how far a confident-sounding rationale can move the decision. The
-deterministic half is also unit-testable, which is what makes the 0.6 threshold
+deterministic half is also unit-testable, which is what makes the 0.7 threshold
 branch something we can prove rather than something we hope for.
 
 The threshold branch is a genuinely different code path, not a log level:
-  >= 0.6 and SCRIPT_ISSUE -> patch applied, test re-run once
-  <  0.6                  -> patch NOT applied, queued for human review with
+  >= 0.7 and SCRIPT_ISSUE -> patch applied, test re-run once
+  <  0.7                  -> patch NOT applied, queued for human review with
                              its evidence, surfaced in the UI and the report
 """
 
@@ -173,7 +173,7 @@ LLM_CONFIDENCE_WEIGHT = 0.4
 
 Deliberately below 0.5 so the evidence has the larger vote. At 0.5 a maximally
 confident model (1.0) paired with damning evidence (0.2) lands exactly on the
-0.6 threshold and auto-applies a patch, which is the wrong outcome: when the
+0.7 threshold and could wrongly auto-apply a patch: when the
 page shows a captcha and the locator is gone, no amount of model conviction
 should move a patch into production. At 0.4 that same pair scores 0.52 and is
 correctly routed to human review.
