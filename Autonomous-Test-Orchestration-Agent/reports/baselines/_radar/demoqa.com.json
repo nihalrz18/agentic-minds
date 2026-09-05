@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "target": "https://demoqa.com",
+  "updated_at": "2026-09-05T10:01:09.702222+00:00",
+  "runs": [
+    {
+      "run_id": "run_e5b223ab90be",
+      "ts": "2026-09-05T08:43:03.843990+00:00",
+      "target": "https://demoqa.com",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Sign in to Book Store with valid credentials",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F002": {
+            "name": "Attempt to sign in with invalid credentials",
+            "category": "error_state",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F003": {
+            "name": "Search for a book by title",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F004": {
+            "name": "Search for a non-existent book",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Submit Text Box form with all fields filled",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F006": {
+            "name": "Submit Text Box form with empty required fields",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F007": {
+            "name": "Navigate to a non-existent page",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Select a radio button option",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 8,
+          "passed": 4,
+          "failed": 4,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 2,
+          "medium_risk": 4,
+          "low_risk": 2
+        }
+      }
+    },
+    {
+      "run_id": "run_0a2bf28f9228",
+      "ts": "2026-09-05T09:17:31.026606+00:00",
+      "target": "https://demoqa.com",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Successful authentication in Book Store",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Invalid credential error in Book Store",
+            "category": "error_state",
+            "risk": "high",
+            "status": "passed"
+          },
+          "F003": {
+            "name": "Search for a book in Book Store",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "healed"
+          },
+          "F004": {
+            "name": "Search with no results in Book Store",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Submit Text Box form with valid data",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F006": {
+            "name": "Submit Text Box form with invalid email",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F007": {
+            "name": "Navigate to a non-existent page",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Check and uncheck the Home checkbox",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F009": {
+            "name": "Select a radio button option",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F010": {
+            "name": "Open a modal dialog",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 10,
+          "passed": 2,
+          "failed": 7,
+          "error": 0,
+          "skipped": 0,
+          "healed": 1,
+          "not_run": 0,
+          "high_risk": 2,
+          "medium_risk": 4,
+          "low_risk": 4
+        }
+      }
+    },
+    {
+      "run_id": "run_5115a3520f9e",
+      "ts": "2026-09-05T09:43:46.220926+00:00",
+      "target": "https://demoqa.com",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Navigate to Checkbox page and check a box",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Submit Text Box form with valid data",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Submit Text Box form with empty required fields",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F004": {
+            "name": "Search for a book in the Book Store",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Search for a non-existent book",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "healed"
+          },
+          "F006": {
+            "name": "Navigate to a non-existent page",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F007": {
+            "name": "Select a radio button option",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Open the Web Tables page and verify table structure",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 8,
+          "passed": 1,
+          "failed": 6,
+          "error": 0,
+          "skipped": 0,
+          "healed": 1,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 5,
+          "low_risk": 3
+        }
+      }
+    },
+    {
+      "run_id": "run_8d82e33144b3",
+      "ts": "2026-09-05T10:01:09.702216+00:00",
+      "target": "https://demoqa.com",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Navigate to Text Box and submit valid form",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Navigate to Text Box and submit empty form",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Navigate to Text Box and submit invalid email",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F004": {
+            "name": "Navigate to Check Box and toggle all checkboxes",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Navigate to Radio Button and select 'Yes'",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F006": {
+            "name": "Navigate to Radio Button and select 'No'",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F007": {
+            "name": "Search for a book in the Book Store Application",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Search for a non-existent book in the Book Store Application",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F009": {
+            "name": "Navigate to a non-existent URL",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          },
+          "F010": {
+            "name": "Navigate to Book Store Login and submit invalid credentials",
+            "category": "error_state",
+            "risk": "high",
+            "status": "not_run"
+          }
+        },
+        "counts": {
+          "flows": 10,
+          "passed": 0,
+          "failed": 9,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 1,
+          "high_risk": 1,
+          "medium_risk": 5,
+          "low_risk": 4
+        }
+      }
+    }
+  ]
+}

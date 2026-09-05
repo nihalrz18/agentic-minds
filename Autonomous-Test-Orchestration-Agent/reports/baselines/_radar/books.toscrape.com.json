@@ -1,7 +1,7 @@
 {
   "version": 1,
   "target": "https://books.toscrape.com/",
-  "updated_at": "2026-09-05T07:43:03.007597+00:00",
+  "updated_at": "2026-09-05T08:29:22.343574+00:00",
   "runs": [
     {
       "run_id": "run_13354f22ecd4",
@@ -286,6 +286,127 @@
           "high_risk": 0,
           "medium_risk": 2,
           "low_risk": 1
+        }
+      }
+    },
+    {
+      "run_id": "run_19f18776a3c9",
+      "ts": "2026-09-05T08:17:46.200434+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_e7f16196108e",
+      "ts": "2026-09-05T08:19:01.958050+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {},
+        "counts": {
+          "flows": 0,
+          "passed": 0,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 0,
+          "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_6b75da8f7471",
+      "ts": "2026-09-05T08:29:22.343568+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Browse Home and navigate to a specific category",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "passed"
+          },
+          "F002": {
+            "name": "View product details from a category listing",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "healed"
+          },
+          "F003": {
+            "name": "Add a book to the basket and verify basket count",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F004": {
+            "name": "View basket contents and proceed to checkout",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F005": {
+            "name": "Search for a non-existent book title",
+            "category": "error_state",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F006": {
+            "name": "Navigate to a non-existent category URL",
+            "category": "error_state",
+            "risk": "low",
+            "status": "passed"
+          },
+          "F007": {
+            "name": "Add multiple books to basket and verify total count",
+            "category": "edge_case",
+            "risk": "high",
+            "status": "failed"
+          },
+          "F008": {
+            "name": "Verify product detail page displays stock availability",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F009": {
+            "name": "Filter products by price range using URL parameters",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F010": {
+            "name": "Remove an item from the basket",
+            "category": "happy_path",
+            "risk": "high",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 10,
+          "passed": 2,
+          "failed": 7,
+          "error": 0,
+          "skipped": 0,
+          "healed": 1,
+          "not_run": 0,
+          "high_risk": 4,
+          "medium_risk": 4,
+          "low_risk": 2
         }
       }
     }
