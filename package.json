@@ -1,0 +1,21 @@
+{
+  "name": "aivar-projects",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nihalrz18/agentic-minds.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/nihalrz18/agentic-minds/issues"
+  },
+  "homepage": "https://github.com/nihalrz18/agentic-minds#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.4.1"
+  }
+}

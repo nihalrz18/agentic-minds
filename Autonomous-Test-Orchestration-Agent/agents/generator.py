@@ -639,7 +639,7 @@ def _quoted_literal(text: str) -> str:
 
 
 def _regex_literal(text: str) -> str:
-    return re.escape(str(text)).replace("\\", "\\\\")
+    return re.escape(str(text))
 
 
 def _docstring(flow: TestFlow) -> str:

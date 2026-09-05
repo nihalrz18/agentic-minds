@@ -16,6 +16,7 @@ import ast
 import pytest
 
 from browser.sandbox import validate_test_source
+from agents.generator import _regex_literal
 from browser.selectors import (
     STRATEGY_PRIORITY,
     SelectorCandidate,
@@ -374,3 +375,11 @@ class TestGeneratedSourceAudit:
         verdict = validate_test_source(source)
         assert verdict.ok is True
         assert any("assertion" in w for w in verdict.warnings)
+
+
+class TestUrlAssertionPatterns:
+    def test_escaped_url_matches_the_original_url(self):
+        import re
+
+        url = "https://example.com/catalog/item-1?color=red"
+        assert re.fullmatch(_regex_literal(url), url)

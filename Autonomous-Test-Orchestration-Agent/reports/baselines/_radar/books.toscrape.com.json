@@ -1,7 +1,7 @@
 {
   "version": 1,
   "target": "https://books.toscrape.com/",
-  "updated_at": "2026-09-05T05:17:10.630749+00:00",
+  "updated_at": "2026-09-05T07:43:03.007597+00:00",
   "runs": [
     {
       "run_id": "run_13354f22ecd4",
@@ -118,6 +118,174 @@
           "high_risk": 0,
           "medium_risk": 0,
           "low_risk": 0
+        }
+      }
+    },
+    {
+      "run_id": "run_e73aa8b838e0",
+      "ts": "2026-09-05T07:19:37.712865+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Open All products | Books to Scrape - Sandbox and confirm it renders",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "passed"
+          },
+          "F002": {
+            "name": "Open All products | Books to Scrape - Sandbox and confirm it renders",
+            "category": "happy_path",
+            "risk": "low",
+            "status": "passed"
+          },
+          "F003": {
+            "name": "Open Books | Books to Scrape - Sandbox and confirm it renders",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F004": {
+            "name": "Submit an empty search query",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "passed"
+          },
+          "F005": {
+            "name": "Request a URL that does not exist",
+            "category": "error_state",
+            "risk": "low",
+            "status": "passed"
+          }
+        },
+        "counts": {
+          "flows": 5,
+          "passed": 5,
+          "failed": 0,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 2,
+          "low_risk": 3
+        }
+      }
+    },
+    {
+      "run_id": "run_29a2ed5435c8",
+      "ts": "2026-09-05T07:28:32.225534+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Open Home and confirm it renders",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Submit an empty search query",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Request a URL that does not exist",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 3,
+          "passed": 0,
+          "failed": 3,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 2,
+          "low_risk": 1
+        }
+      }
+    },
+    {
+      "run_id": "run_beb99a16735c",
+      "ts": "2026-09-05T07:30:27.278240+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Open Home and confirm it renders",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Submit an empty search query",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Request a URL that does not exist",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 3,
+          "passed": 0,
+          "failed": 3,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 2,
+          "low_risk": 1
+        }
+      }
+    },
+    {
+      "run_id": "run_a9c0fe53ad5c",
+      "ts": "2026-09-05T07:43:03.007570+00:00",
+      "target": "https://books.toscrape.com/",
+      "snapshot": {
+        "flows": {
+          "F001": {
+            "name": "Open Home and confirm it renders",
+            "category": "happy_path",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F002": {
+            "name": "Submit an empty search query",
+            "category": "edge_case",
+            "risk": "medium",
+            "status": "failed"
+          },
+          "F003": {
+            "name": "Request a URL that does not exist",
+            "category": "error_state",
+            "risk": "low",
+            "status": "failed"
+          }
+        },
+        "counts": {
+          "flows": 3,
+          "passed": 0,
+          "failed": 3,
+          "error": 0,
+          "skipped": 0,
+          "healed": 0,
+          "not_run": 0,
+          "high_risk": 0,
+          "medium_risk": 2,
+          "low_risk": 1
         }
       }
     }
