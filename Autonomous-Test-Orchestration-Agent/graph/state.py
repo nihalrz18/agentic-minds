@@ -449,6 +449,24 @@ class PRDGapItem(BaseModel):
     similarity: float = 0.0
 
 
+# --------------------------------------------------------------------------
+# Agent memory
+# --------------------------------------------------------------------------
+class CarriedFlow(BaseModel):
+    """A flow carried forward from memory instead of being re-planned this run.
+
+    Keyed by :func:`differentiation.memory.keys.flow_key`, never by the
+    per-run ``flow_id`` - see :mod:`differentiation.memory.planner_memory` for
+    why the latter is not stable across runs.
+    """
+
+    flow_key: str
+    name_hint: str = ""
+    category: str = "happy_path"
+    origin_run_id: str = ""
+    risk: str = "medium"
+
+
 class FinalReport(BaseModel):
     """The synthesised deliverable: machine JSON + rendered Markdown/HTML."""
 
@@ -482,6 +500,10 @@ class FinalReport(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
+    memory: dict[str, Any] = Field(default_factory=dict)
+    """Per-agent memory contribution: carried-forward flows, selectors served
+    from memory, recurring/resolved defects and cumulative coverage. Empty
+    when agent memory is disabled or this is the first run for the target."""
 
 
 # --------------------------------------------------------------------------
@@ -527,6 +549,18 @@ class OrchestrationState(TypedDict, total=False):
     packaged_bugs: list[PackagedBug]
     prd_gaps: list[PRDGapItem]
     regression_radar: dict[str, Any]
+
+    # ---- agent memory ------------------------------------------------------
+    agent_memory: dict[str, Any]
+    """The three loaded namespaces (planner/generator/healer) plus meta, read
+    once at run start. Not re-read inside nodes."""
+    memory_directive: dict[str, Any]
+    """Planner's computed target depth, satisfied levels and memory stats,
+    for the decision log and the report."""
+    carried_flows: list[CarriedFlow]
+    memory_stats: dict[str, Any]
+    """Cross-agent counters: selectors served from memory, flows routed to the
+    fallback compiler by memory, recurring/resolved defects."""
 
     # ---- bookkeeping -----------------------------------------------------
     decision_log: Annotated[list[DecisionEvent], operator.add]
@@ -574,6 +608,10 @@ def initial_state(
         packaged_bugs=[],
         prd_gaps=[],
         regression_radar={},
+        agent_memory={},
+        memory_directive={},
+        carried_flows=[],
+        memory_stats={},
         decision_log=[],
         current_stage="orchestrator",
         status="running",

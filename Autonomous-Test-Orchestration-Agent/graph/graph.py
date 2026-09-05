@@ -381,7 +381,7 @@ async def generator_node(state: OrchestrationState) -> dict[str, Any]:
                 detail="; ".join(test.warnings[:2]) or "no warnings",
                 risk=risk.value,
                 flow_id=flow.id,
-                confidence=0.8 if test.repair_attempts == 0 else 0.6,
+                confidence=0.8 if test.repair_attempts == 0 else 0.7,
             )
         else:
             ctx.emit(
@@ -559,7 +559,7 @@ async def healer_node(state: OrchestrationState) -> dict[str, Any]:
             f"{summary['auto_applied']} auto-applied, "
             f"{summary['needs_human_review']} queued for human review"
         ),
-        detail="patches are only applied at or above 0.60 confidence",
+        detail="patches are only applied at or above 0.70 confidence",
     )
     ctx.set_progress(
         healer_actions=[a.model_dump(mode="json") for a in actions],
@@ -823,8 +823,8 @@ def render_mermaid() -> str:
     gen --> run{{Runner}}
     run -- failures --> heal{{Healer<br/>SCRIPT_ISSUE vs GENUINE_DEFECT}}
     run -- all green --> vis{{Visual diff}}
-    heal -- confidence >= 0.6 --> run
-    heal -- confidence < 0.6 --> vis
+    heal -- confidence >= 0.7 --> run
+    heal -- confidence < 0.7 --> vis
     vis --> bugs{{Bug packager}}
     bugs --> report{{Risk-ranked report}}
     report --> END([JSON + Markdown + HTML])

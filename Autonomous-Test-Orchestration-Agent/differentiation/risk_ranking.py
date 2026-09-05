@@ -195,6 +195,7 @@ async def rank_flows(
                 {"role": "user", "content": risk_user([f.model_dump(mode="json") for f in flows])},
             ],
             task="risk_ranking",
+            max_tokens=700,
         )
         raw = coerce_list(payload, "classifications")
         known = {f.id: f for f in flows}

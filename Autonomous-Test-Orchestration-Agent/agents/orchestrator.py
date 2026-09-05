@@ -179,7 +179,7 @@ async def evaluate_coverage(
                 },
             ],
             task=f"coverage_gate:rev{plan.revision}",
-            max_tokens=2500,
+            max_tokens=900,
         )
         if isinstance(payload, dict):
             checks = [
@@ -442,7 +442,7 @@ async def synthesise_report(
                     {"role": "user", "content": report_synthesis_user(facts=facts)},
                 ],
                 task="report:synthesis",
-                max_tokens=1500,
+                max_tokens=700,
             )
             if isinstance(payload, dict):
                 synthesis = {

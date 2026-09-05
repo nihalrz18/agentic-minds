@@ -1,4 +1,4 @@
-"""The 0.60 auto-apply threshold and the branch it gates.
+"""The 0.70 auto-apply threshold and the branch it gates.
 
 This is the safety-critical logic in the system. Two properties matter most and
 both are asserted here directly:
@@ -28,18 +28,18 @@ from graph.state import DefectClass
 
 class TestThresholdConstant:
     def test_threshold_is_the_documented_value(self):
-        assert CONFIDENCE_AUTO_APPLY_THRESHOLD == 0.6
+        assert CONFIDENCE_AUTO_APPLY_THRESHOLD == 0.7
 
 
 class TestShouldAutoApply:
     def test_script_issue_at_threshold_applies(self):
-        assert should_auto_apply(DefectClass.SCRIPT_ISSUE, 0.6) is True
+        assert should_auto_apply(DefectClass.SCRIPT_ISSUE, 0.7) is True
 
     def test_script_issue_above_threshold_applies(self):
         assert should_auto_apply(DefectClass.SCRIPT_ISSUE, 0.95) is True
 
     def test_script_issue_just_below_threshold_does_not_apply(self):
-        assert should_auto_apply(DefectClass.SCRIPT_ISSUE, 0.59) is False
+        assert should_auto_apply(DefectClass.SCRIPT_ISSUE, 0.69) is False
 
     def test_the_reported_low_confidence_case_does_not_apply(self):
         # "Healer: 0.41 confidence - NOT auto-applied, queued for human review"
@@ -78,7 +78,7 @@ class TestDecide:
         assert decision.auto_apply is False
         assert decision.needs_human_review is True
         assert decision.action == "queue_for_review"
-        assert "0.41" in decision.reason and "0.60" in decision.reason
+        assert "0.41" in decision.reason and "0.70" in decision.reason
 
     def test_genuine_defect_routes_to_the_bug_packager(self):
         decision = decide(DefectClass.GENUINE_DEFECT, 0.9)
