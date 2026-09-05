@@ -21,6 +21,9 @@ curl -X POST localhost:8000/run -H 'Content-Type: application/json' \
 2. [Setup](#setup)
 3. [Running it](#running-it)
 4. [Architecture](#architecture)
+   - [High-Level System Architecture](#high-level-system-architecture)
+   - [High-Level Execution Flow](#high-level-execution-flow)
+   - [LangGraph Decision Engine & State Machine Invariants](#langgraph-decision-engine--state-machine-invariants)
 5. [The rubrics](#the-rubrics)
 6. [Credentials and security](#credentials-and-security)
 7. [Rate limits and model routing](#rate-limits-and-model-routing)
@@ -204,67 +207,169 @@ a `STORAGE_STATE` file. They are never in the test files.
 
 ## Architecture
 
-### The pipeline
+### High-Level System Architecture
+
+The Autonomous Test Orchestration Agent is architected as an autonomous, multi-tier system that bridges declarative LLM reasoning with live browser-level ground truth.
+
+```mermaid
+flowchart TB
+    subgraph PRESENTATION["1. Presentation & Control Layer"]
+        UI["<b>Streamlit Dashboard</b><br/>Interactive Stage Rail · Real-time Metrics · Event Log · Diff Viewer"]
+        CLI["<b>CLI Utility (cli.py)</b><br/>Direct Headless/Headed Execution Without Web Servers"]
+        API_CLIENT["<b>API Consumers</b><br/>cURL · CI/CD Pipelines · Webhooks"]
+    end
+
+    subgraph GATEWAY["2. FastAPI Service & Gateway Layer"]
+        APP["<b>FastAPI Core API</b><br/>POST /run · GET /run/{id}/status · GET /run/{id}/report"]
+        STORE["<b>In-Memory Store & Task Registry</b><br/>Thread-Safe Run Records & Background Worker Tasks"]
+        SECRET["<b>SecretBox Credential Isolation</b><br/>Ephemeral Run Credential Vault · Wiped in finally block"]
+        CTX["<b>RunContext & Diagnostics</b><br/>Append-Only events.jsonl · Live Snapshot Generator"]
+    end
+
+    subgraph ORCHESTRATOR["3. Autonomous Orchestrator (LangGraph Core)"]
+        GRAPH["<b>StateGraph Engine</b><br/>Deterministic Finite State Machine & Conditional Routing"]
+        WRAPPER["<b>Instrumented @node Decorator</b><br/>Start/Complete Lifecycle · Error Capture · Fast-Path Degraded Routing"]
+        STATE["<b>OrchestrationState Context</b><br/>Test Plans · Target Selectors · Test Results · Healer Actions · Artifacts"]
+    end
+
+    subgraph AGENTS_DIFF["4. Agents & Differentiation Engines"]
+        subgraph SUBAGENTS["Autonomous Sub-Agents"]
+            PLANNER["<b>Planner Agent</b><br/>Form Discovery · BFS Exploration · Intent/PRD Conditioning"]
+            GENERATOR["<b>Generator Agent</b><br/>Live Selector Validation · AST Sandbox · Code Synthesis"]
+            HEALER["<b>Healer Agent</b><br/>Defect Classification · Evidence Blending · Non-Weakening Patching"]
+        end
+        subgraph DIFF_ENGINES["Differentiation Engines"]
+            GATE["<b>Coverage Gate</b><br/>C1–C6 Rubric Evaluation · Mechanical + LLM Dual Verification"]
+            RISK["<b>Risk Ranking</b><br/>HIGH / MED / LOW Bands · Rubric Citation · Priority Sequencing"]
+            VISUAL["<b>Visual Diff Engine</b><br/>Baseline Comparison · SSIM / Pixel Tolerance Detection"]
+            BUG_PKG["<b>Bug Packager</b><br/>Self-Contained repro.py · Screenshots · Ticket Markdown"]
+            RADAR["<b>Regression Radar</b><br/>Historical Stability Trends · Flakiness Tracking Across Runs"]
+            PRD_GAP["<b>PRD Gap Analysis</b><br/>Requirement Traceability · Discovered Surface Discrepancies"]
+        end
+    end
+
+    subgraph RUNTIME["5. Browser Automation & Execution Runtime"]
+        PLAYWRIGHT["<b>Playwright Browser Engine</b><br/>Async Chromium · Isolated Contexts · Cookie / Auth State"]
+        SELECTORS["<b>Multi-Strategy Selector Prober</b><br/>8 Locator Heuristics (IDs, Test-IDs, Roles, Text, ARIA, Hierarchical)"]
+        SANDBOX["<b>Execution Sandbox & AST Audit</b><br/>Import Whitelisting · Dunder Blocking · Syntax Validation"]
+        COMPILER["<b>Deterministic Fallback Compiler</b><br/>AST-Safe Pytest Code Generation If Model Code Output Fails"]
+    end
+
+    subgraph LLM_TIER["6. Model Routing & Resilience Tier"]
+        LLM_CLIENT["<b>Multi-Provider LLM Client</b><br/>Groq (Primary) · OpenAI · Google Gemini (Fallback)"]
+        ROUTING["<b>Role-Based Model Separation</b><br/>MODEL_REASONING (70B) vs MODEL_CODEGEN (8B)"]
+        RETRY_RATE["<b>Resilience & Throttling</b><br/>Token Bucket Rate Limiting · Exponential Backoff · JSON Repair Loop"]
+    end
+
+    subgraph ARTIFACTS["7. Storage & Artifacts Output"]
+        TEST_SUITE["<b>Generated Pytest Suite</b><br/>Standalone tests · conftest.py · pytest.ini"]
+        BUG_ARTIFACTS["<b>Packaged Defects</b><br/>bugs/BUG-00N/ · repro.py · screenshot.png · ticket.md"]
+        REPORTS["<b>Executive Quality Reports</b><br/>report.json · report.md · report.html"]
+        LOGS["<b>Audit & Decision Trail</b><br/>events.jsonl · agent.log · radar/baseline history"]
+    end
+
+    PRESENTATION --> GATEWAY
+    GATEWAY --> ORCHESTRATOR
+    ORCHESTRATOR --> AGENTS_DIFF
+    AGENTS_DIFF --> RUNTIME
+    AGENTS_DIFF --> LLM_TIER
+    AGENTS_DIFF --> ARTIFACTS
+    RUNTIME --> ARTIFACTS
+```
+
+#### System Layer Responsibilities
+
+| Tier | Component | Core Responsibilities |
+|---|---|---|
+| **Presentation** | Streamlit Dashboard & CLI | Renders live pipeline stage execution rail, responsive metric cards, chronological decision log with stage jump-links, visual diff sliders, and artifact download drawers. The CLI offers zero-dependency standalone execution. |
+| **Control Gateway** | FastAPI & Store | Manages asynchronous run dispatching, polling status endpoints (`GET /run/{id}/status`), artifact retrieval, and strict credential isolation via `SecretBox`. |
+| **State Engine** | LangGraph Orchestrator | Drives explicit state transitions across nodes using an immutable snapshot model (`OrchestrationState`). Wraps nodes with telemetry decorators and catches unhandled exceptions into non-fatal degraded summaries. |
+| **Sub-Agents & Engines** | Planner, Generator, Healer, Differentiation | Specialized autonomous entities for crawling and structured flow planning, DOM-validated test generation, dual-confidence failure triage, risk ranking, visual regression detection, and defect packaging. |
+| **Runtime & Sandbox** | Playwright & AST Sandbox | Manages headless browser sessions, conducts live selector discovery across 8 distinct strategies, audits generated Python test ASTs for security, and provides a deterministic compilation fallback. |
+| **LLM Tier** | Multi-Provider Gateway | Segregates heavy reasoning (70B parameter models) from mechanical code synthesis (8B parameter models). Features automated token-bucket rate limiting, exponential backoff, and JSON repair roundtrips. |
+| **Artifact Storage** | Local File System & Disk | Persists self-contained Pytest suites, standalone reproduction scripts (`repro.py`), screenshots, visual regression baselines, historical radar trends, and multi-format reports. |
+
+---
+
+### High-Level Execution Flow
+
+The agent executes through 9 sequential, gated stages connected by deterministic routing logic and feedback loops.
 
 ```mermaid
 flowchart TD
-    IN(["URL (required)<br/>+ credentials? + PRD? + intent?"]) --> PL
+    START(["<b>START</b><br/>Target URL (+ Credentials, Intent, PRD)"]) --> INIT["<b>Initialization & Context Setup</b><br/>Ephemeral SecretBox · Browser Launch · Crawl Budget Setup"]
 
-    subgraph AGENTS["Sub-agents"]
-        direction TB
-        PL["<b>Planner</b><br/>login first, then BFS crawl<br/>→ structured test plan"]
-        GEN["<b>Generator</b><br/>live selector validation<br/>→ Playwright test files"]
-        HEAL["<b>Healer</b><br/>SCRIPT_ISSUE vs GENUINE_DEFECT<br/>+ confidence"]
-    end
+    INIT --> S1["<b>1. Planner</b><br/>Authenticate (if credentials present)<br/>BFS Crawl DOM (bounded depth/pages)<br/>Synthesize structured test plan flows"]
 
-    subgraph META["Meta-orchestrator"]
-        direction TB
-        GATE{"<b>Coverage gate</b><br/>rubric C1–C6<br/><i>runs BEFORE generation</i>"}
-        ROUTE{"replan / proceed / escalate<br/><i>confidence + rationale</i>"}
-    end
+    S1 --> S2{"<b>2. Coverage Gate</b><br/>Mechanical rubric check<br/>+ LLM judge (C1–C6)"}
 
-    subgraph DIFF["Differentiation layer"]
-        direction TB
-        RISK["<b>Risk ranking</b><br/>HIGH / MED / LOW, rubric-cited"]
-        VIS["<b>Visual diff</b><br/>Playwright + Pillow vs baseline"]
-        BUG["<b>Bug packager</b><br/>repro.py + screenshot + ticket.md"]
-    end
+    S2 -->|"Gaps found &<br/>replan_count < 2"| S2_REPLAN["<b>Re-plan Feedback Loop</b><br/>Attach gate critique & missing rubric lines<br/>Increment replan_count"]
+    S2_REPLAN --> S1
 
-    PL --> GATE
-    GATE -->|"gaps found"| ROUTE
-    ROUTE -->|"replan (budget 1–2/2)<br/>with specific feedback"| PL
-    ROUTE -->|"budget spent → force_proceeded"| RISK
-    GATE -->|"passed"| RISK
+    S2 -->|"Gaps found &<br/>budget exhausted"| S2_FORCE["<b>Force Proceed</b><br/>Stamp force_proceeded=True<br/>Record coverage limitations"]
+    S2_FORCE --> S3
 
-    RISK --> GEN --> RUN["<b>Runner</b><br/>sequential, or parallel behind a flag<br/>screenshot + DOM + console per test"]
-    RUN -->|"failures"| HEAL
-    RUN -->|"all green"| VIS
-    HEAL -->|"SCRIPT_ISSUE ≥ 0.60<br/>patch locator/wait"| RUN
-    HEAL -->|"< 0.60 → NOT applied,<br/>queued for human review"| VIS
-    HEAL -->|"GENUINE_DEFECT<br/>(assertions never weakened)"| BUG
-    VIS --> BUG --> REP["<b>Report</b><br/>ordered by risk"]
-    REP --> OUT(["report.json · report.md · report.html<br/>bugs/BUG-00N/ · generated_tests/"])
+    S2 -->|"Gate PASSED"| S3["<b>3. Risk Ranking</b><br/>Classify flows into HIGH / MEDIUM / LOW<br/>Establish generation and execution priority"]
 
-    PL -.-> LOG
-    GATE -.-> LOG
-    ROUTE -.-> LOG
-    RISK -.-> LOG
-    GEN -.-> LOG
-    RUN -.-> LOG
-    HEAL -.-> LOG
-    VIS -.-> LOG
-    BUG -.-> LOG
-    REP -.-> LOG
+    S3 --> S4["<b>4. Generator</b><br/>Iterate flows in risk priority order<br/>Live-resolve DOM selectors across 8 strategies<br/>Synthesize executable Playwright test scripts<br/>AST Sandbox validation (or Deterministic Compiler fallback)"]
 
-    LOG[["<b>decision_log</b> — every node emits on start / decide / finish<br/>→ events.jsonl · GET /run/id/status · live Streamlit view"]]
+    S4 --> S5["<b>5. Runner</b><br/>Execute generated test suite in Playwright<br/>Capture pass/fail, DOM traces, console logs, screenshots"]
 
-    style META fill:#fff4e6,stroke:#f59e0b,stroke-width:2px
-    style DIFF fill:#eef6ff,stroke:#3b82f6,stroke-width:2px
-    style AGENTS fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
-    style LOG fill:#fdf2f8,stroke:#ec4899,stroke-width:2px
+    S5 --> S5_CHECK{"Test Results?"}
+
+    S5_CHECK -->|"All tests passed"| S7
+    S5_CHECK -->|"Failures detected"| S6{"<b>6. Healer</b><br/>Diagnose root cause<br/>Blend model confidence (40%)<br/>with empirical DOM evidence (60%)"}
+
+    S6 -->|"SCRIPT_ISSUE &<br/>confidence ≥ 0.70"| S6_PATCH["<b>Auto-Patch Script</b><br/>AST Assertion Preservation check<br/>Apply locator / timing patch"]
+    S6_PATCH -->|"heal_pass_count < 1"| S5
+
+    S6 -->|"Inconclusive /<br/>confidence < 0.70"| S6_REVIEW["<b>Flag for Human Review</b><br/>Queue in report without blocking run"]
+    S6_REVIEW --> S7
+
+    S6 -->|"GENUINE_DEFECT"| S8_DEFECT["<b>Confirm Application Defect</b><br/>Verify assertions were not weakened"]
+    S8_DEFECT --> S8
+
+    S7["<b>7. Visual Diff</b><br/>Compare captured screenshots against stored baselines<br/>Detect visual regressions via pixel/SSIM delta"] --> S8
+
+    S8["<b>8. Bug Packager</b><br/>Package confirmed bugs & visual regressions<br/>Generate standalone repro.py + ticket.md + screenshots"] --> S9
+
+    S9["<b>9. Report Synthesis</b><br/>Compile risk-ranked summary, PRD gaps, radar trends<br/>Write report.html, report.md, report.json, test artifacts"] --> COMPLETE(["<b>END (Run Completed)</b><br/>Credentials wiped · Standalone test suite ready"])
+
+    %% Short-circuit error handling path
+    S1 -.->|"Fatal Exception<br/>(e.g., Unreachable, 429)"| ERR_CIRCUIT["<b>Abort Circuit / Fast-Path to Report</b><br/>Failed stage marked FAILED<br/>Unexecuted downstream stages marked SKIPPED"]
+    S4 -.->|"Zero Valid Tests"| ERR_CIRCUIT
+    ERR_CIRCUIT -.-> S9
+
+    classDef stageNode fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef decisionNode fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
+    classDef loopNode fill:#374151,stroke:#f59e0b,stroke-width:1.5px,color:#f8fafc;
+    classDef terminalNode fill:#0f172a,stroke:#22c55e,stroke-width:2.5px,color:#f8fafc;
+    classDef errorNode fill:#450a0a,stroke:#ef4444,stroke-width:1.5px,color:#fca5a5;
+
+    class S1,S3,S4,S5,S7,S8,S9 stageNode;
+    class S2,S5_CHECK,S6 decisionNode;
+    class S2_REPLAN,S2_FORCE,S6_PATCH,S6_REVIEW,S8_DEFECT loopNode;
+    class START,COMPLETE terminalNode;
+    class ERR_CIRCUIT errorNode;
 ```
 
-### Why LangGraph, and why these edges
+#### Pipeline Stage Execution Matrix
+
+| Stage | Node Name | Primary Responsibility | Success Condition | Branch / Fallback Behavior |
+|---|---|---|---|---|
+| **1. Planner** | `planner` | Authenticates (if credentials provided) and performs BFS crawl of the target domain. Synthesizes structured test flows with explicit step intentions and expected assertions. | Valid SiteMap and non-empty `test_plan.flows` generated. | If crawl reaches 0 pages or model raises an unhandled error, short-circuits directly to `report`. |
+| **2. Coverage Gate** | `coverage_gate` | Applies deterministic rubric verification alongside an LLM judge against criteria C1–C6. Evaluates breadth, auth, error states, and e-commerce signals. | All applicable rubric requirements satisfied (`passed=True`). | Gaps trigger a re-plan loop back to `planner` with detailed feedback (budget: 2). On budget exhaustion, force-proceeds with limitations stamped. |
+| **3. Risk Ranking** | `risk_ranking` | Analyzes flows against risk criteria and categorizes each into HIGH, MEDIUM, or LOW impact tiers. Cites specific rubric justifications. | All flows assigned valid risk classifications and confidence scores. | Unknown/ambiguous flows safely default to MEDIUM. Ordering dictates subsequent generation, execution, and reporting order. |
+| **4. Generator** | `generator` | Iterates flows in risk order. Discovers and live-probes element locators against the browser DOM across 8 fallback strategies. Compiles executable Playwright Python tests. | Valid executable test suite written to disk passing AST sandbox audit. | If model-authored code fails AST validation twice, the deterministic compiler produces code directly from validated steps and locators. |
+| **5. Runner** | `runner` | Executes generated tests using Playwright. Collects execution status, timings, console outputs, network failures, DOM snapshots, and screenshots. | All tests executed with granular per-test results captured. | Clean run routes directly to `visual_diff`. Failures trigger routing to `healer`. |
+| **6. Healer** | `healer` | Investigates failing tests. Re-probes selectors and DOM state to differentiate script brittleness (`SCRIPT_ISSUE`) from actual application bugs (`GENUINE_DEFECT`). | Definitive classification with blended confidence score. | Confidence ≥ 0.70 auto-applies a non-weakening patch and re-runs once (budget: 1). Confidence < 0.70 queues finding for human review without halting the run. Confirmed defects route to `bug_packager`. |
+| **7. Visual Diff** | `visual_diff` | Compares flow screenshots against stored baseline images using Pillow pixel tolerance and perceptual diffing algorithms. | Visual comparisons completed, baseline updated or diff masks recorded. | Disabled automatically via `ENABLE_VISUAL_DIFF=false` if baselining is not desired. |
+| **8. Bug Packager** | `bug_packager` | Converts confirmed genuine defects and severe visual regressions into actionable developer bug packages. | Standalone reproduction scripts (`repro.py`), ticket markdown (`ticket.md`), and annotated screenshots generated in `bugs/BUG-00N/`. | If zero genuine defects exist, logs an event and routes smoothly to `report`. |
+| **9. Report** | `report` | Synthesizes all run findings into risk-ordered, executive-ready deliverables. Calculates totals, PRD gaps, regression radar stability, and business impact. | `report.json`, `report.md`, and self-contained `report.html` written to the run directory. | Always executes even after upstream failures, ensuring full transparency and actionable diagnostics. |
+
+---
+
+### LangGraph Decision Engine & State Machine Invariants
 
 The graph is nodes and **conditional edges**, not a prompt chain, because three
 of the transitions are real decisions with real budgets:
@@ -290,7 +395,9 @@ to a model's judgment.
 Every node is wrapped by a decorator that emits `start` / `complete` events,
 keeps the live progress snapshot current, and converts an exception into a
 recorded error plus a routing hint — so a node failure degrades the run into a
-**partial report** instead of killing the process.
+**partial report** instead of killing the process. On node failure, unexecuted
+downstream stages are marked `SKIPPED` while the terminal `report` stage produces
+complete diagnostics.
 
 ### The five design decisions worth defending
 
